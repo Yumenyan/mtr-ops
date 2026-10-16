@@ -687,7 +687,7 @@ public final class ApiHandler {
 					w.field("station", es.name);
 				}
 				w.field("sec", s.etaTicks[i] / 20);
-				w.field("clock", clock((int) (snap.dayTime + s.etaTicks[i])));
+				w.field("clock", java.time.LocalTime.ofSecondOfDay(Math.floorMod(java.time.LocalTime.now().toSecondOfDay() + s.etaTicks[i] / 20L, 86400L)).toString().substring(0, 5));
 				w.endObject();
 			}
 			w.endArray();
