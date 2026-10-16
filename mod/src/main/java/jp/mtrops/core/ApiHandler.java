@@ -26,13 +26,17 @@ import java.util.function.Function;
  * GET /api/stations      駅 / GET /api/stations/{id} 到着予定つき
  * GET /api/delays        路線ごとの遅延集計
  * GET /api/incidents     ?active=1 で未解消のみ
+ * GET /api/geometry      駅間ごとの距離と線形(折れ線)。?from=&to= で絞り込み
+ * GET /api/sections      駅間距離のみ(?points=1 で線形も)
+ * GET /api/routes/{id}   路線の駅順・駅間距離・累積距離・線形(?points=0 で線形なし)
+ * GET /api/distance      ?from=駅ID&to=駅ID[&route=路線ID] 2駅間の線路沿い距離
  *
  * IDはJavaScriptで精度が落ちるため、すべて文字列で返す。
  * 詳細レベルが低くて載っていない項目は、キーごと省略する。
  */
 public final class ApiHandler {
 
-	public static final String VERSION = "1.0.0";
+	public static final String VERSION = "2.0.0";
 
 	public static final class Response {
 		public final int code;
@@ -145,12 +149,24 @@ public final class ApiHandler {
 					return ok(incidents(q));
 				case "/api/ghosts":
 					return ok(ghosts());
+				case "/api/geometry":
+					return ok(geometry(q, true));
+				case "/api/sections":
+					return ok(geometry(q, "1".equals(q.get("points"))));
+				case "/api/distance": {
+					final String body = distance(q);
+					return body == null ? new Response(404, error("station not found")) : ok(body);
+				}
 				default:
 					break;
 			}
 			if (p.startsWith("/api/trains/")) {
 				final String body = trainDetail(p.substring("/api/trains/".length()));
 				return body == null ? new Response(404, error("train not found")) : ok(body);
+			}
+			if (p.startsWith("/api/routes/")) {
+				final String body = routeDetail(p.substring("/api/routes/".length()), !"0".equals(q.get("points")));
+				return body == null ? new Response(404, error("route not found")) : ok(body);
 			}
 			if (p.startsWith("/api/stations/")) {
 				final String body = stationDetail(p.substring("/api/stations/".length()));
@@ -188,6 +204,8 @@ public final class ApiHandler {
 		w.field("stale", s == null || age > 5000);
 		w.field("snapshotAgeMs", s == null ? -1 : age);
 		w.field("topologyRev", store.topology().rev);
+		w.field("geometryRev", store.geometry().rev);
+		w.field("geometrySections", store.geometry().sections.size());
 		if (s != null) {
 			w.field("seq", s.seq);
 			w.field("detailLevel", s.level);
@@ -241,6 +259,289 @@ public final class ApiHandler {
 		writeRouteArray(w, s, false);
 		w.endObject();
 		return w.toString();
+	}
+
+
+	// ------------------------------------------------------------------ 駅間距離・線路の線形
+
+	/** 駅間1区間の距離。measured=false は線路の実測が無く、駅の座標の直線距離で補ったもの。 */
+	private static final class Seg {
+		long from, to;
+		double distance;
+		boolean measured;
+		boolean reversed;
+		int[] points;
+	}
+
+	private Seg segment(long from, long to) {
+		final Geometry g = store.geometry();
+		final Seg seg = new Seg();
+		seg.from = from;
+		seg.to = to;
+		Geometry.Section sec = g.find(from, to);
+		if (sec == null) {
+			sec = g.find(to, from);
+			seg.reversed = sec != null;
+		}
+		if (sec != null) {
+			seg.measured = true;
+			seg.distance = sec.distance;
+			seg.points = sec.points;
+			return seg;
+		}
+		final Topology.Station a = stationMap.get(from);
+		final Topology.Station b = stationMap.get(to);
+		seg.distance = a == null || b == null ? 0 : Math.hypot(a.x - b.x, a.z - b.z);
+		seg.points = a == null || b == null ? new int[0] : new int[]{a.x, 0, a.z, b.x, 0, b.z};
+		return seg;
+	}
+
+	private void writePoints(JsonWriter w, int[] pts, boolean reversed) {
+		w.beginArray();
+		final int n = pts.length / 3;
+		for (int k = 0; k < n; k++) {
+			final int i = reversed ? n - 1 - k : k;
+			w.beginArray().value(pts[i * 3]).value(pts[i * 3 + 1]).value(pts[i * 3 + 2]).endArray();
+		}
+		w.endArray();
+	}
+
+	private void writeSeg(JsonWriter w, Seg seg, boolean withPoints) {
+		w.beginObject();
+		w.idField("fromStationId", seg.from);
+		w.idField("toStationId", seg.to);
+		final Topology.Station a = stationMap.get(seg.from);
+		final Topology.Station b = stationMap.get(seg.to);
+		if (a != null) {
+			w.field("from", a.name);
+		}
+		if (b != null) {
+			w.field("to", b.name);
+		}
+		w.field("distanceM", seg.distance, 1);
+		w.field("measured", seg.measured);
+		if (withPoints) {
+			w.name("points");
+			writePoints(w, seg.points, seg.reversed);
+		}
+		w.endObject();
+	}
+
+	private String geometry(Map<String, String> q, boolean withPoints) {
+		final Geometry g = store.geometry();
+		final String from = q.get("from");
+		final String to = q.get("to");
+		final JsonWriter w = new JsonWriter();
+		w.beginObject().field("ok", true).field("rev", g.rev);
+		w.name("sections").beginArray();
+		for (final Geometry.Section sec : g.sections) {
+			if ((from != null && !from.equals(Long.toString(sec.fromStationId))) || (to != null && !to.equals(Long.toString(sec.toStationId)))) {
+				continue;
+			}
+			final Seg seg = new Seg();
+			seg.from = sec.fromStationId;
+			seg.to = sec.toStationId;
+			seg.distance = sec.distance;
+			seg.measured = true;
+			seg.points = sec.points;
+			writeSeg(w, seg, withPoints);
+		}
+		w.endArray().endObject();
+		return w.toString();
+	}
+
+	private String routeDetail(String idText, boolean withPoints) {
+		final Topology.Route r;
+		try {
+			r = routeMap.get(Long.parseLong(idText));
+		} catch (NumberFormatException e) {
+			return null;
+		}
+		if (r == null) {
+			return null;
+		}
+		final JsonWriter w = new JsonWriter();
+		w.beginObject().field("ok", true);
+		w.idField("id", r.id).field("name", r.name);
+		if (!r.number.isEmpty()) {
+			w.field("number", r.number);
+		}
+		w.field("color", hex(r.color));
+		w.field("circular", r.circular);
+		w.field("destination", r.destination);
+		double cum = 0;
+		boolean allMeasured = true;
+		final List<Seg> segs = new ArrayList<>();
+		for (int i = 1; i < r.stationIds.length; i++) {
+			segs.add(segment(r.stationIds[i - 1], r.stationIds[i]));
+		}
+		w.name("stations").beginArray();
+		for (int i = 0; i < r.stationIds.length; i++) {
+			if (i > 0) {
+				cum += segs.get(i - 1).distance;
+			}
+			final Topology.Station st = stationMap.get(r.stationIds[i]);
+			w.beginObject();
+			w.idField("id", r.stationIds[i]);
+			w.field("name", st == null ? "" : st.name);
+			if (st != null) {
+				w.field("x", st.x).field("z", st.z);
+			}
+			w.field("cumulativeM", cum, 1);
+			w.endObject();
+		}
+		w.endArray();
+		w.name("segments").beginArray();
+		for (final Seg seg : segs) {
+			allMeasured &= seg.measured;
+			writeSeg(w, seg, withPoints);
+		}
+		w.endArray();
+		w.field("totalM", cum, 1);
+		w.field("allMeasured", allMeasured);
+		w.endObject();
+		return w.toString();
+	}
+
+	/** 2駅間の距離。route 指定: その路線の停車順に沿って合計。未指定: 駅間グラフの最短経路(無ければ直線)。 */
+	private String distance(Map<String, String> q) {
+		final long from, to;
+		try {
+			from = Long.parseLong(q.getOrDefault("from", ""));
+			to = Long.parseLong(q.getOrDefault("to", ""));
+		} catch (NumberFormatException e) {
+			return null;
+		}
+		if (!stationMap.containsKey(from) || !stationMap.containsKey(to)) {
+			return null;
+		}
+		List<Seg> path = null;
+		String method = "";
+		final String routeText = q.get("route");
+		if (routeText != null) {
+			try {
+				final Topology.Route r = routeMap.get(Long.parseLong(routeText));
+				if (r != null) {
+					path = alongRoute(r, from, to);
+					method = "route";
+				}
+			} catch (NumberFormatException ignored) {
+			}
+		}
+		if (path == null) {
+			path = shortestPath(from, to);
+			method = "graph";
+		}
+		double total = 0;
+		boolean allMeasured = true;
+		for (final Seg seg : path) {
+			total += seg.distance;
+			allMeasured &= seg.measured;
+		}
+		final JsonWriter w = new JsonWriter();
+		w.beginObject().field("ok", true);
+		w.idField("fromStationId", from).idField("toStationId", to);
+		w.field("distanceM", total, 1);
+		w.field("method", method);
+		w.field("allMeasured", allMeasured);
+		w.field("straightM", straight(from, to), 1);
+		w.name("segments").beginArray();
+		for (final Seg seg : path) {
+			writeSeg(w, seg, "1".equals(q.get("points")));
+		}
+		w.endArray().endObject();
+		return w.toString();
+	}
+
+	private double straight(long a, long b) {
+		final Topology.Station x = stationMap.get(a);
+		final Topology.Station y = stationMap.get(b);
+		return x == null || y == null ? 0 : Math.hypot(x.x - y.x, x.z - y.z);
+	}
+
+	private List<Seg> alongRoute(Topology.Route r, long from, long to) {
+		int i = -1, j = -1;
+		for (int k = 0; k < r.stationIds.length; k++) {
+			if (r.stationIds[k] == from && i < 0) {
+				i = k;
+			}
+			if (r.stationIds[k] == to && i >= 0 && k >= i) {
+				j = k;
+				break;
+			}
+		}
+		final List<Seg> out = new ArrayList<>();
+		if (i < 0 || j < 0) {
+			return shortestPath(from, to);
+		}
+		for (int k = i + 1; k <= j; k++) {
+			out.add(segment(r.stationIds[k - 1], r.stationIds[k]));
+		}
+		return out;
+	}
+
+	/** 計測済み区間+路線の隣接駅を辺とした最短経路(ダイクストラ)。繋がらなければ直線1区間。 */
+	private List<Seg> shortestPath(long from, long to) {
+		final Map<Long, List<long[]>> adj = new HashMap<>();
+		final Set<String> seen = new HashSet<>();
+		for (final Geometry.Section sec : store.geometry().sections) {
+			addEdge(adj, seen, sec.fromStationId, sec.toStationId);
+		}
+		for (final Topology.Route r : store.topology().routes) {
+			for (int i = 1; i < r.stationIds.length; i++) {
+				addEdge(adj, seen, r.stationIds[i - 1], r.stationIds[i]);
+			}
+		}
+		final Map<Long, Double> dist = new HashMap<>();
+		final Map<Long, Long> prev = new HashMap<>();
+		final java.util.PriorityQueue<double[]> pq = new java.util.PriorityQueue<>(Comparator.comparingDouble(a -> a[0]));
+		final Map<Integer, Long> ids = new HashMap<>();
+		dist.put(from, 0.0);
+		ids.put(0, from);
+		pq.add(new double[]{0, 0});
+		int counter = 1;
+		while (!pq.isEmpty()) {
+			final double[] cur = pq.poll();
+			final long u = ids.get((int) cur[1]);
+			if (cur[0] > dist.getOrDefault(u, Double.MAX_VALUE)) {
+				continue;
+			}
+			if (u == to) {
+				break;
+			}
+			for (final long[] e : adj.getOrDefault(u, Collections.emptyList())) {
+				final long v = e[0];
+				final double nd = cur[0] + segment(u, v).distance;
+				if (nd < dist.getOrDefault(v, Double.MAX_VALUE)) {
+					dist.put(v, nd);
+					prev.put(v, u);
+					ids.put(counter, v);
+					pq.add(new double[]{nd, counter++});
+				}
+			}
+		}
+		final List<Seg> out = new ArrayList<>();
+		if (!prev.containsKey(to)) {
+			if (from != to) {
+				out.add(segment(from, to));
+			}
+			return out;
+		}
+		long cur = to;
+		while (cur != from) {
+			final long p = prev.get(cur);
+			out.add(0, segment(p, cur));
+			cur = p;
+		}
+		return out;
+	}
+
+	private static void addEdge(Map<Long, List<long[]>> adj, Set<String> seen, long a, long b) {
+		if (a == b || !seen.add(Math.min(a, b) + ":" + Math.max(a, b))) {
+			return;
+		}
+		adj.computeIfAbsent(a, k -> new ArrayList<>()).add(new long[]{b});
+		adj.computeIfAbsent(b, k -> new ArrayList<>()).add(new long[]{a});
 	}
 
 	// ------------------------------------------------------------------ trains

@@ -14,6 +14,7 @@ public final class ClientStore {
 
 	private volatile Topology topology = new Topology();
 	private volatile OpsRegistry registry = new OpsRegistry();
+	private volatile Geometry geometry = new Geometry();
 	private volatile Snapshot live;
 	private volatile long liveReceivedMillis;
 	private volatile int lastEditResultCode = -1;
@@ -28,6 +29,30 @@ public final class ClientStore {
 
 	public OpsRegistry registry() {
 		return registry;
+	}
+
+	public Geometry geometry() {
+		return geometry;
+	}
+
+	private final Map<Integer, List<GeometryCodec.Part>> pendingGeometry = new HashMap<>();
+
+	/** 線形データの受信(複数パートが揃ったら差し替える)。 */
+	public synchronized void acceptGeometryPart(GeometryCodec.Part p) {
+		final List<GeometryCodec.Part> list = pendingGeometry.computeIfAbsent(p.rev, k -> new ArrayList<>());
+		list.removeIf(q -> q.part == p.part);
+		list.add(p);
+		pendingGeometry.keySet().removeIf(rev -> rev < p.rev);
+		if (list.size() >= p.parts) {
+			list.sort(java.util.Comparator.comparingInt(q -> q.part));
+			final Geometry g = new Geometry();
+			g.rev = p.rev;
+			for (final GeometryCodec.Part q : list) {
+				g.sections.addAll(q.sections);
+			}
+			pendingGeometry.remove(p.rev);
+			geometry = g;
+		}
 	}
 
 	public Snapshot live() {
@@ -109,6 +134,8 @@ public final class ClientStore {
 		topology = new Topology();
 		registry = new OpsRegistry();
 		live = null;
+		geometry = new Geometry();
 		pending.clear();
+		pendingGeometry.clear();
 	}
 }

@@ -54,6 +54,8 @@ public class CoreSelfTest {
 		rangeTests();
 		budgetTests();
 		httpTests();
+		geometryTests();
+		entryMatcherTests();
 		System.out.println("\n" + passed + " passed, " + failed + " failed");
 		System.exit(failed == 0 ? 0 : 1);
 	}
@@ -529,6 +531,84 @@ public class CoreSelfTest {
 			check(line != null && line.contains("405"), "POST は 405(読み取り専用)");
 		}
 		server.stop();
+	}
+
+
+	static void geometryTests() throws Exception {
+		System.out.println("[geometry]");
+		final Geometry g = new Geometry();
+		g.rev = 7;
+		for (int i = 0; i < 3; i++) {
+			final Geometry.Section sec = new Geometry.Section();
+			sec.fromStationId = 10 + i; sec.toStationId = 11 + i; sec.distance = 123.5 + i;
+			sec.points = new int[]{100 * i, 64, -50, 100 * i + 40, 65, -80, 100 * i + 99, 64, -130000};
+			g.sections.add(sec);
+		}
+		final List<byte[]> parts = GeometryCodec.encode(g, 150);
+		check(parts.size() > 1, "線形は上限を超えると複数パートに分かれる (" + parts.size() + ")");
+		final ClientStore st = new ClientStore();
+		Collections.reverse(parts);
+		for (final byte[] b : parts) st.acceptGeometryPart(GeometryCodec.decode(b));
+		final Geometry r = st.geometry();
+		check(r.rev == 7 && r.sections.size() == 3, "全パートが揃うと復元される");
+		final Geometry.Section a = r.find(11, 12);
+		check(a != null && Math.abs(a.distance - 124.5) < 0.01 && a.points[8] == -130000 && a.points[3] == 140, "距離と頂点(差分符号化)が復元される");
+
+		// API
+		final Topology topo = new Topology();
+		for (int i = 10; i <= 14; i++) {
+			final Topology.Station s = new Topology.Station();
+			s.id = i; s.name = "S" + i; s.x = i * 100; s.z = 0;
+			topo.stations.add(s);
+		}
+		final Topology.Route route = new Topology.Route();
+		route.id = 1; route.name = "R"; route.stationIds = new long[]{10, 11, 12, 13};
+		topo.routes.add(route);
+		st.setTopology(topo);
+		final ApiHandler api = new ApiHandler(st);
+		final Map<String, String> q = new HashMap<>();
+		q.put("from", "10"); q.put("to", "12"); q.put("route", "1");
+		final String d = api.handle("/api/distance", q).body;
+		check(d.contains("\"distanceM\":248") && d.contains("\"method\":\"route\""), "路線に沿った2駅間距離(計測値の合計): " + d.substring(0, Math.min(120, d.length())));
+		q.remove("route");
+		final String d2 = api.handle("/api/distance", q).body;
+		check(d2.contains("\"method\":\"graph\"") && d2.contains("\"allMeasured\":true"), "路線指定なしは区間グラフの最短経路");
+		q.put("from", "13"); q.put("to", "14");
+		check(api.handle("/api/distance", q).body.contains("\"allMeasured\":false"), "未計測の区間は直線距離で補い measured=false");
+		final String rd = api.handle("/api/routes/1", new HashMap<>()).body;
+		check(rd.contains("\"cumulativeM\"") && rd.contains("\"points\"") && rd.contains("\"totalM\""), "路線詳細に累積距離と線形");
+		check(api.handle("/api/routes/999", new HashMap<>()).code == 404, "存在しない路線は404");
+		check(api.handle("/api/sections", new HashMap<>()).body.contains("\"measured\":true"), "/api/sections");
+	}
+
+	static void entryMatcherTests() {
+		System.out.println("[entry matcher]");
+		final Topology topo = new Topology();
+		for (int i = 1; i <= 4; i++) {
+			final Topology.Station s = new Topology.Station();
+			s.id = i; s.name = "S" + i; s.x = i * 1000; s.z = 0;
+			topo.stations.add(s);
+		}
+		final Topology.Route route = new Topology.Route();
+		route.id = 5; route.stationIds = new long[]{1, 2, 3, 4};
+		topo.routes.add(route);
+		final Snapshot snap = new Snapshot();
+		// 駅4に向かう: 次駅=4(近い) / 次駅=3 / 次駅=2、別路線、駅3を出た後
+		final long[][] defs = {{101, 5, 3, 3500}, {102, 5, 2, 2100}, {103, 5, 4, 3900}, {104, 9, 4, 3990}};
+		for (final long[] d : defs) {
+			final TrainView v = new TrainView();
+			v.s.id = d[0]; v.s.routeId = d[1]; v.s.nextStationId = d[2]; v.s.onRoute = true; v.s.x = d[3];
+			v.delaySec = (int) d[0];
+			snap.trains.add(v);
+		}
+		final List<TrainView> c = EntryMatcher.candidates(snap, topo, 5, 4);
+		check(c.size() == 3 && c.get(0).s.id == 103 && c.get(1).s.id == 101 && c.get(2).s.id == 102, "駅4への到着順: 103, 101, 102");
+		check(EntryMatcher.match(snap, topo, 5, 4, 1).delaySec == 101, "rank=1 は2番目に着く列車");
+		check(EntryMatcher.match(snap, topo, 5, 4, 3) == null, "列車数を超える rank は null");
+		snap.trains.get(2).s.atStop = true; snap.trains.get(2).s.curStationId = 4;
+		check(EntryMatcher.match(snap, topo, 5, 4, 0).s.id == 103, "停車中の列車が先頭");
+		snap.trains.get(2).s.atStop = false; snap.trains.get(2).s.nextStationId = 3; snap.trains.get(2).s.x = 3300;
+		check(EntryMatcher.candidates(snap, topo, 5, 2).size() == 1, "通り過ぎた列車は候補にならない(駅2は102のみ)");
 	}
 
 	private static class Part0 {

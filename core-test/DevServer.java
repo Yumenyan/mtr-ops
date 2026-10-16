@@ -121,7 +121,10 @@ public class DevServer {
 		final Line l2 = line(2, "港南線|Konan Line", 0xF39700, false, "K", hokusei, chuo, shinmachi, nanpu);
 		final Line l3 = line(3, "環状線|Loop Line", 0x00A95C, true, "", chuo, ohkawa, konan, shinmachi, midori, shiratori, takami);
 		final Line l4 = line(4, "空港線|Airport Line", 0x009EA7, false, "A", konan, kaihin, kuko);
-		lines.addAll(List.of(l1, l2, l3, l4));
+		// 同じ路線名の系統(短い区間運転・逆向き)。Web側で1本のラインに自動でマージされる
+		final Line l5 = line(5, "星陽線(SAKB)|Seiyo Line", 0x0072BC, false, "S", chuo, ohkawa, sakura, seiyoEast);
+		final Line l6 = line(6, "星陽線(SAKB)|Seiyo Line", 0x0072BC, false, "S", seiyoEast, sakura, ohkawa, chuo, takami, seiyoWest);
+		lines.addAll(List.of(l1, l2, l3, l4, l5, l6));
 
 		final Topology topo = new Topology();
 		topo.rev = 1;
@@ -168,6 +171,7 @@ public class DevServer {
 				{l2, 0.05, sd21, depot2, 0}, {l2, 0.35, sd21, depot2, 0}, {l2, 0.65, sd22, depot2, 0},
 				{l3, 0.0, sd12, depot1, 0}, {l3, 0.25, sd12, depot1, 0}, {l3, 0.5, sd11, depot1, 0}, {l3, 0.75, sd11, depot1, 0},
 				{l4, 0.1, sd22, depot2, 0}, {l4, 0.6, sd21, depot2, 0},
+				{l5, 0.2, sd11, depot1, 150}, {l6, 0.30, sd11, depot1, 0}, {l6, 0.33, sd12, depot1, 0}, {l6, 0.36, sd12, depot1, 200}, {l6, 0.7, sd11, depot1, 0},
 		};
 		for (final Object[] p : plan) {
 			final Sim s = new Sim();
@@ -191,6 +195,24 @@ public class DevServer {
 		final ClientStore store = new ClientStore();
 		store.setTopology(topo);
 		store.setRegistry(registry);
+		// 線形(駅間距離): 空港線以外は、少し曲げた折れ線で「計測済み」にする。空港線は未計測(直線で補完)の見本。
+		final Geometry geo = new Geometry();
+		geo.rev = 1;
+		for (final Line l : lines) {
+			if (l.id == 4) continue;
+			for (int i = 1; i < l.sts.size(); i++) {
+				final St a = l.sts.get(i - 1), b = l.sts.get(i);
+				final double mx = (a.x() + b.x()) / 2.0 + (b.z() - a.z()) * 0.08, mz = (a.z() + b.z()) / 2.0 - (b.x() - a.x()) * 0.08;
+				final Geometry.Section sec = new Geometry.Section();
+				sec.fromStationId = a.id(); sec.toStationId = b.id();
+				sec.points = new int[]{a.x(), 70, a.z(), (int) mx, 70, (int) mz, b.x(), 70, b.z()};
+				sec.distance = Math.hypot(mx - a.x(), mz - a.z()) + Math.hypot(b.x() - mx, b.z() - mz);
+				geo.sections.add(sec);
+			}
+		}
+		for (final byte[] part : GeometryCodec.encode(geo, 900_000)) {
+			try { store.acceptGeometryPart(GeometryCodec.decode(part)); } catch (java.io.IOException e) { throw new IllegalStateException(e); }
+		}
 
 		final ApiHandler api = new ApiHandler(store, id -> id.equals("e233") ? "E233系1000番台|E233 Series" : id.equals("e235") ? "E235系|E235 Series" : "");
 		final LocalHttpServer server = new LocalHttpServer(port, api, rel -> {
