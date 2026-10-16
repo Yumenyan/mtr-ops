@@ -250,7 +250,7 @@ public final class MtrAdapter {
 					continue;
 				}
 				final Station st = dc.platformIdToStation.get(seg.savedRailBaseId);
-				if (st != null && !(n > 0 && ids[n - 1] == st.id)) {
+				if (st != null && !contains(ids, n, st.id)) {
 					ids[n] = st.id;
 					ticks[n] = (int) Math.max(0, Math.min(Integer.MAX_VALUE, Math.round(remain)));
 					n++;
@@ -261,6 +261,16 @@ public final class MtrAdapter {
 		}
 		s.etaStationIds = java.util.Arrays.copyOf(ids, n);
 		s.etaTicks = java.util.Arrays.copyOf(ticks, n);
+	}
+
+	/** 経路が同じ駅を2度通る(往復・周回)とき、2度目以降は先の周回の時刻なので載せない。 */
+	private static boolean contains(long[] ids, int n, long id) {
+		for (int i = 0; i < n; i++) {
+			if (ids[i] == id) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** 進捗 progress の位置で終わる経路区間の停車時間(tick)。無ければ0。 */

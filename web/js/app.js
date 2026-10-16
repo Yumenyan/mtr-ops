@@ -564,7 +564,8 @@
     const lateTxt = (t.delaySec || 0) < 30 ? 'なし' : fmtDelay(t.delaySec);
     const dc = colOf(t.status);
     const nCars = t.cars || 0;
-    const etaOf = new Map((t.etas || []).map(e => [String(e.stationId), e]));
+    // 同じ駅が複数回出る(往復・周回)ときは最初(=いちばん近い)ものを使い、前の駅より早い時刻になるものは出さない
+    const etaOf = new Map(); { let last = -1; for (const e of t.etas || []) { const k = String(e.stationId); if (etaOf.has(k)) continue; if (e.sec < last) continue; etaOf.set(k, e); last = e.sec; } }
     // 到着予想は現実の時刻(この画面を開いている端末の時計)。残り秒数は最後に受信した時点からの値。
     const etaClock = sec => { const d = new Date((S.lastOk || Date.now()) + sec * 1000); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
     const etaIn = sec => { const rest = Math.max(0, Math.round(sec - (Date.now() - (S.lastOk || Date.now())) / 1000)); return rest < 60 ? `あと${rest}秒` : `あと${Math.floor(rest / 60)}分${pad2(rest % 60)}秒`; };
