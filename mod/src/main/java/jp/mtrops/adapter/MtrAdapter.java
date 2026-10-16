@@ -183,7 +183,7 @@ public final class MtrAdapter {
 			s.idealTicks = idealTicks(segments, s.railProgress, s.atStop, t.getElapsedDwellTicks());
 			s.idealNextArrivalTicks = s.atStop ? Double.NaN : idealNextArrival(segments, s.railProgress);
 			s.elapsedTicks = tracker.elapsed(s.id, true, nowTick, s.idealTicks);
-			fillEtas(s, segments, dc);
+			fillEtas(t, distances, s, segments, dc);
 		} else {
 			tracker.elapsed(s.id, false, nowTick, Double.NaN);
 		}
@@ -212,8 +212,12 @@ public final class MtrAdapter {
 		return Double.NaN;
 	}
 
-	/** 現在位置より先にある停車駅(ホームのある区間の終点)への、ダイヤ上の残りtick。 */
-	private static void fillEtas(TrainSample s, List<Siding.TimeSegment> segments, DataCache dc) {
+	/**
+	 * 現在位置より先にある停車駅への、ダイヤ上の残りtick。
+	 * 「ダイヤ上の到着時刻の差」をそのまま使うと、区間をまたぐほど誤差(停車時間の扱いの差など)が積み上がって早く出るため、
+	 * 区間ごとの走行時間(終点時刻 − 始点時刻)を足し上げ、停車時間(PathData.dwellTime × 10 tick)は別に1回だけ足す。
+	 */
+	private static void fillEtas(TrainServer t, List<Double> distances, TrainSample s, List<Siding.TimeSegment> segments, DataCache dc) {
 		if (Double.isNaN(s.idealTicks)) {
 			return;
 		}
@@ -221,29 +225,53 @@ public final class MtrAdapter {
 		final int[] ticks = new int[TrainSample.MAX_ETAS];
 		int n = 0;
 		try {
+			double remain = s.atStop && s.dwellRemainTicks > 0 ? s.dwellRemainTicks : 0;
+			double prevEnd = s.idealTicks;
 			for (final Siding.TimeSegment seg : segments) {
 				if (n >= ids.length) {
 					break;
 				}
-				if (seg.savedRailBaseId == 0 || seg.endRailProgress <= s.railProgress + 0.5) {
+				if (seg.endRailProgress <= s.railProgress + 0.5) {
+					continue;
+				}
+				double start = Double.NaN;
+				if (seg.startRailProgress >= s.railProgress - 1e-6) {
+					start = seg.getTime(seg.startRailProgress);
+				}
+				if (Double.isNaN(start) || Double.isInfinite(start)) {
+					start = Math.min(prevEnd, seg.endTime);
+					if (seg.startRailProgress < s.railProgress) {
+						start = s.idealTicks;
+					}
+				}
+				remain += Math.max(0, seg.endTime - start);
+				prevEnd = seg.endTime;
+				if (seg.savedRailBaseId == 0) {
 					continue;
 				}
 				final Station st = dc.platformIdToStation.get(seg.savedRailBaseId);
-				if (st == null || (n > 0 && ids[n - 1] == st.id)) {
-					continue;
+				if (st != null && !(n > 0 && ids[n - 1] == st.id)) {
+					ids[n] = st.id;
+					ticks[n] = (int) Math.max(0, Math.min(Integer.MAX_VALUE, Math.round(remain)));
+					n++;
 				}
-				final double remain = seg.endTime - s.idealTicks;
-				if (Double.isNaN(remain) || Double.isInfinite(remain)) {
-					continue;
-				}
-				ids[n] = st.id;
-				ticks[n] = (int) Math.max(0, Math.min(Integer.MAX_VALUE, Math.round(remain)));
-				n++;
+				remain += dwellTicksAt(t, distances, seg.endRailProgress);
 			}
 		} catch (RuntimeException ignored) {
 		}
 		s.etaStationIds = java.util.Arrays.copyOf(ids, n);
 		s.etaTicks = java.util.Arrays.copyOf(ticks, n);
+	}
+
+	/** 進捗 progress の位置で終わる経路区間の停車時間(tick)。無ければ0。 */
+	private static double dwellTicksAt(TrainServer t, List<Double> distances, double progress) {
+		final int size = Math.min(t.path.size(), distances.size());
+		for (int i = 0; i < size; i++) {
+			if (Math.abs(distances.get(i) - progress) < 1.5 && t.path.get(i).dwellTime > 0) {
+				return t.path.get(i).dwellTime * 10.0;
+			}
+		}
+		return 0;
 	}
 
 	private static double idealNextArrival(List<Siding.TimeSegment> segments, double progress) {

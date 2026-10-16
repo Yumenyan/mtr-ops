@@ -568,6 +568,13 @@
     // 到着予想は現実の時刻(この画面を開いている端末の時計)。残り秒数は最後に受信した時点からの値。
     const etaClock = sec => { const d = new Date((S.lastOk || Date.now()) + sec * 1000); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
     const etaIn = sec => { const rest = Math.max(0, Math.round(sec - (Date.now() - (S.lastOk || Date.now())) / 1000)); return rest < 60 ? `あと${rest}秒` : `あと${Math.floor(rest / 60)}分${pad2(rest % 60)}秒`; };
+    // 遅れているときは「定刻 ▶ 見込」(東京メトロアプリと同じ)。定刻 = 見込 − 現在の遅れ
+    const etaCell = eta => {
+      const late = t.delaySec || 0, exp = etaClock(eta.sec), sch = etaClock(eta.sec - late);
+      const delayed = late >= 30 && sch !== exp;
+      return h('span', { class: 'tm' }, delayed ? h('span', { class: 'sch' }, sch) : null, delayed ? h('span', { class: 'arw' }, '▶') : null,
+        h('span', { class: delayed ? 'exp late' : 'exp' }, exp), h('small', null, `${delayed ? '定刻▶見込 ' : ''}${etaIn(eta.sec)}`));
+    };
     const carLabel = i => { const raw = (t.carNumbers || [])[i] || ''; const m = raw.match(/(\d+)\s*$/); return m ? m[1] : raw; };
     const carsEl = cls => h('div', { class: 'cars ' + (cls || ''), style: `--c:${color}` },
       h('span', { class: 'nose' }),
@@ -578,7 +585,7 @@
       return h('div', { class: 'trow ' + (cls || '') + (withCars ? ' hascars' : '') }, h('div', { class: 'nd' }, codeEls(stationCode(letters, ids[i]))),
         h('div', { class: 'nm' }, jp(s0.name), en(s0.name) ? h('small', null, en(s0.name)) : null),
         withCars ? carsEl('inrow') : null,
-        eta ? h('span', { class: 'tm' + ((t.delaySec || 0) >= 60 ? ' late' : '') }, etaClock(eta.sec), h('small', null, etaIn(eta.sec))) : null,
+        eta ? etaCell(eta) : null,
         tag ? h('span', { class: 'tag ' + (tagCls || '') }, tag) : null);
     };
     if (tp) {
