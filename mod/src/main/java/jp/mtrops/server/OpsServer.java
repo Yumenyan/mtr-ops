@@ -7,6 +7,8 @@ import jp.mtrops.adapter.MtrAdapter;
 import jp.mtrops.core.AnomalyDetector;
 import jp.mtrops.core.ElapsedTracker;
 import jp.mtrops.core.FormationAssigner;
+import jp.mtrops.core.Geometry;
+import jp.mtrops.core.GeometryCodec;
 import jp.mtrops.core.OpsConfig;
 import jp.mtrops.core.OpsRegistry;
 import jp.mtrops.core.RegistryCodec;
@@ -87,6 +89,10 @@ public final class OpsServer {
 	private int topologyRev;
 	private int topologyContentHash;
 	private byte[] topologyBytes;
+	private final Set<Long> scannedTrains = new HashSet<>();
+	private final java.util.Map<String, Geometry.Section> sectionMap = new java.util.LinkedHashMap<>();
+	private List<byte[]> geometryParts = new ArrayList<>();
+	private int geometryRev;
 
 	private OpsServer(MinecraftServer server) {
 		this.server = server;
@@ -115,6 +121,9 @@ public final class OpsServer {
 		}
 		send(player, Net.TOPOLOGY, topologyBytes);
 		send(player, Net.REGISTRY, RegistryCodec.encodeRegistry(registry, false));
+		for (final byte[] part : geometryParts) {
+			send(player, Net.GEOMETRY, part);
+		}
 	}
 
 	public void unsubscribe(ServerPlayer player) {
@@ -155,6 +164,7 @@ public final class OpsServer {
 
 		if (tickCount % 100 == 0) {
 			refreshTopology(false);
+			refreshGeometry();
 		}
 		if (tickCount % cfg.sampleTicks != 0) {
 			return;
@@ -192,6 +202,22 @@ public final class OpsServer {
 		for (final ServerPlayer p : subscribedPlayers()) {
 			for (final byte[] part : parts) {
 				send(p, Net.SNAPSHOT, part);
+			}
+		}
+	}
+
+	/** 走っている列車の経路から、駅間の距離・線形を少しずつ集める(新しい区間が増えたときだけ配信)。 */
+	private void refreshGeometry() {
+		if (!MtrAdapter.collectGeometry(server, scannedTrains, sectionMap, 3)) {
+			return;
+		}
+		final Geometry g = new Geometry();
+		g.rev = ++geometryRev;
+		g.sections.addAll(sectionMap.values());
+		geometryParts = GeometryCodec.encode(g, Net.MAX_S2C_BYTES);
+		for (final ServerPlayer p : subscribedPlayers()) {
+			for (final byte[] part : geometryParts) {
+				send(p, Net.GEOMETRY, part);
 			}
 		}
 	}

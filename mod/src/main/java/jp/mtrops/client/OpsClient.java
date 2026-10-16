@@ -7,6 +7,7 @@ import jp.mtrops.Net;
 import jp.mtrops.adapter.MtrClientAdapter;
 import jp.mtrops.core.ApiHandler;
 import jp.mtrops.core.ClientStore;
+import jp.mtrops.core.GeometryCodec;
 import jp.mtrops.core.LocalHttpServer;
 import jp.mtrops.core.OpsConfig;
 import jp.mtrops.core.OpsRegistry;
@@ -72,6 +73,14 @@ public final class OpsClient {
 				STORE.setRegistry(RegistryCodec.decodeRegistry(bytes));
 			} catch (IOException | RuntimeException e) {
 				LOGGER.warn("車庫台帳の受信に失敗: {}", e.toString());
+			}
+		});
+		ClientPlayNetworking.registerGlobalReceiver(Net.GEOMETRY, (client, handler, buf, sender) -> {
+			final byte[] bytes = buf.readByteArray();
+			try {
+				STORE.acceptGeometryPart(GeometryCodec.decode(bytes));
+			} catch (IOException | RuntimeException e) {
+				LOGGER.warn("線形データの受信に失敗: {}", e.toString());
 			}
 		});
 		ClientPlayNetworking.registerGlobalReceiver(Net.SNAPSHOT, (client, handler, buf, sender) -> {

@@ -9,6 +9,7 @@ import net.minecraft.resources.ResourceLocation;
  *  S2C TOPOLOGY      路線・駅・車庫・車庫線(変更時のみ)
  *  S2C REGISTRY      全車庫の車庫台帳(編成・車番)。更新のたびに全車庫分を同期
  *  S2C SNAPSHOT      列車スナップショット(SnapshotCodec。上限超過時は詳細レベルを下げる/分割)
+ *  S2C GEOMETRY      駅間ごとの距離と線路の線形(変更時のみ。複数パートに分割)
  *  C2S DEPOT_UPDATE  変更した1車庫分だけを送る。全車庫の丸ごと上書きは行わない
  *  S2C EDIT_RESULT   DEPOT_UPDATE の結果(コード + メッセージ)
  *
@@ -17,12 +18,13 @@ import net.minecraft.resources.ResourceLocation;
 public final class Net {
 
 	public static final String MOD_ID = "mtrops";
-	public static final int PROTOCOL = 5;
+	public static final int PROTOCOL = 6;
 
 	public static final ResourceLocation HELLO = new ResourceLocation(MOD_ID, "hello");
 	public static final ResourceLocation TOPOLOGY = new ResourceLocation(MOD_ID, "topology");
 	public static final ResourceLocation REGISTRY = new ResourceLocation(MOD_ID, "registry");
 	public static final ResourceLocation SNAPSHOT = new ResourceLocation(MOD_ID, "snapshot");
+	public static final ResourceLocation GEOMETRY = new ResourceLocation(MOD_ID, "geometry");
 	public static final ResourceLocation DEPOT_UPDATE = new ResourceLocation(MOD_ID, "depot_update");
 	public static final ResourceLocation EDIT_RESULT = new ResourceLocation(MOD_ID, "edit_result");
 

@@ -1,6 +1,7 @@
 package jp.mtrops.adapter;
 
 import jp.mtrops.core.ElapsedTracker;
+import jp.mtrops.core.Geometry;
 import jp.mtrops.core.Topology;
 import jp.mtrops.core.TrainSample;
 import mtr.data.DataCache;
@@ -296,6 +297,160 @@ public final class MtrAdapter {
 			deg += 360;
 		}
 		return (float) deg;
+	}
+
+
+	// ------------------------------------------------------------------ 駅間の距離・線形
+
+	private static final double SAMPLE_STEP = 3.0;
+	private static final double SIMPLIFY_TOLERANCE = 0.75;
+	private static final int MAX_SECTION_POINTS = 400;
+
+	/**
+	 * まだ調べていない列車の経路(PathData)から、駅間の実距離と線形を取り出して out に足す。
+	 * 駅の「ホーム」を通る連続したPathDataを1ノードとみなし、ノード間(=ホーム端〜ホーム端)を1区間にする。
+	 * 1回の呼び出しで調べる列車数は maxTrains まで(サーバーtickの負荷を抑える)。
+	 * @return 新しく区間を追加したか
+	 */
+	public static boolean collectGeometry(MinecraftServer server, Set<Long> scanned, java.util.Map<String, Geometry.Section> out, int maxTrains) {
+		boolean added = false;
+		int budget = maxTrains;
+		for (final ServerLevel level : server.getAllLevels()) {
+			final RailwayData rd = RailwayData.getInstance(level);
+			if (rd == null) {
+				continue;
+			}
+			for (final Siding siding : new ArrayList<>(rd.sidings)) {
+				for (final TrainServer t : new ArrayList<>(MtrFields.trains(siding))) {
+					if (budget <= 0) {
+						return added;
+					}
+					if (scanned.contains(t.id)) {
+						continue;
+					}
+					final List<Double> distances = MtrFields.distances(t);
+					if (t.path.isEmpty() || distances.size() < t.path.size()) {
+						continue;
+					}
+					scanned.add(t.id);
+					budget--;
+					try {
+						added |= scanPath(t, distances, rd.dataCache, out);
+					} catch (RuntimeException e) {
+						logRateLimited("駅間の線形の取得に失敗 (id=" + t.id + ")", e);
+					}
+				}
+			}
+		}
+		return added;
+	}
+
+	private static boolean scanPath(TrainServer t, List<Double> distances, DataCache dc, java.util.Map<String, Geometry.Section> out) {
+		boolean added = false;
+		long prevStation = 0;
+		double prevEnd = 0;
+		int i = 0;
+		final int n = t.path.size();
+		while (i < n) {
+			final long st = stationId(dc, t.path.get(i));
+			if (st == 0) {
+				i++;
+				continue;
+			}
+			int j = i;
+			while (j + 1 < n && stationId(dc, t.path.get(j + 1)) == st) {
+				j++;
+			}
+			final double end = distances.get(j);
+			if (prevStation != 0 && prevStation != st && end > prevEnd) {
+				final String key = prevStation + ">" + st;
+				if (!out.containsKey(key) && end - prevEnd < 30000) {
+					out.put(key, buildSection(t, distances, prevStation, st, prevEnd, end));
+					added = true;
+				}
+			}
+			prevStation = st;
+			prevEnd = end;
+			i = j + 1;
+		}
+		return added;
+	}
+
+	private static Geometry.Section buildSection(TrainServer t, List<Double> distances, long from, long to, double start, double end) {
+		final List<double[]> pts = new ArrayList<>();
+		for (double p = start; p < end; p += SAMPLE_STEP) {
+			addPoint(pts, positionAt(t, distances, p));
+		}
+		addPoint(pts, positionAt(t, distances, end - 0.01));
+		final List<double[]> simple = simplify(pts, SIMPLIFY_TOLERANCE);
+		final Geometry.Section sec = new Geometry.Section();
+		sec.fromStationId = from;
+		sec.toStationId = to;
+		sec.distance = end - start;
+		final int count = Math.min(MAX_SECTION_POINTS, simple.size());
+		sec.points = new int[count * 3];
+		for (int k = 0; k < count; k++) {
+			// 上限を超えるときは等間隔に間引く(両端は残す)
+			final double[] pt = simple.get(count == simple.size() ? k : (int) Math.round(k * (simple.size() - 1) / (double) (count - 1)));
+			sec.points[k * 3] = (int) Math.round(pt[0]);
+			sec.points[k * 3 + 1] = (int) Math.round(pt[1]);
+			sec.points[k * 3 + 2] = (int) Math.round(pt[2]);
+		}
+		return sec;
+	}
+
+	private static void addPoint(List<double[]> pts, Vec3 v) {
+		if (v != null) {
+			pts.add(new double[]{v.x, v.y, v.z});
+		}
+	}
+
+	/** Douglas-Peucker(XZ平面)。 */
+	private static List<double[]> simplify(List<double[]> pts, double tol) {
+		if (pts.size() < 3) {
+			return pts;
+		}
+		final boolean[] keep = new boolean[pts.size()];
+		keep[0] = true;
+		keep[pts.size() - 1] = true;
+		final java.util.ArrayDeque<int[]> stack = new java.util.ArrayDeque<>();
+		stack.push(new int[]{0, pts.size() - 1});
+		while (!stack.isEmpty()) {
+			final int[] r = stack.pop();
+			double max = -1;
+			int idx = -1;
+			final double[] a = pts.get(r[0]);
+			final double[] b = pts.get(r[1]);
+			for (int k = r[0] + 1; k < r[1]; k++) {
+				final double d = perpendicular(pts.get(k), a, b);
+				if (d > max) {
+					max = d;
+					idx = k;
+				}
+			}
+			if (max > tol && idx > 0) {
+				keep[idx] = true;
+				stack.push(new int[]{r[0], idx});
+				stack.push(new int[]{idx, r[1]});
+			}
+		}
+		final List<double[]> out = new ArrayList<>();
+		for (int k = 0; k < pts.size(); k++) {
+			if (keep[k]) {
+				out.add(pts.get(k));
+			}
+		}
+		return out;
+	}
+
+	private static double perpendicular(double[] p, double[] a, double[] b) {
+		final double dx = b[0] - a[0];
+		final double dz = b[2] - a[2];
+		final double len = Math.hypot(dx, dz);
+		if (len < 1e-9) {
+			return Math.hypot(p[0] - a[0], p[2] - a[2]);
+		}
+		return Math.abs(dz * (p[0] - a[0]) - dx * (p[2] - a[2])) / len;
 	}
 
 	// ------------------------------------------------------------------ トポロジー
