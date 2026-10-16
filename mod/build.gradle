@@ -1,0 +1,51 @@
+plugins {
+	id 'fabric-loom' version '1.6-SNAPSHOT'
+	id 'java'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+	archivesName = "${project.archives_base_name}-fabric-${project.minecraft_version}"
+}
+
+repositories {
+	// MTR 本体は Maven で配布されていないため、jar を libs/ に置いて参照する(libs/README.txt 参照)
+	flatDir { dirs 'libs' }
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	// MTR 3.2.2-hotfix-1 のソースと同じ Mojang 公式マッピングを使うので、メソッド名がソースと一致する
+	mappings loom.officialMojangMappings()
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+	// コンパイル時のみ MTR を参照する(実行時は mods フォルダ側の MTR を使う)
+	modCompileOnly files(fileTree(dir: 'libs', include: ['MTR-fabric-1.19.2-3.2.2-hotfix-1*.jar']).files)
+	// runClient で動作確認したい場合は次の行を有効にする
+	// modLocalRuntime files(fileTree(dir: 'libs', include: ['MTR-fabric-1.19.2-3.2.2-hotfix-1*.jar']).files)
+}
+
+processResources {
+	inputs.property 'version', project.version
+	filesMatching('fabric.mod.json') {
+		expand 'version': project.version
+	}
+	// Webアプリ(../web)を jar に同梱し、ローカルHTTPサーバーから配信する
+	from('../web') {
+		into 'assets/mtrops/web'
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	options.encoding = 'UTF-8'
+	options.release = 17
+}
+
+java {
+	sourceCompatibility = JavaVersion.VERSION_17
+	targetCompatibility = JavaVersion.VERSION_17
+	withSourcesJar()
+}

@@ -1,0 +1,197 @@
+package jp.mtrops.client;
+
+import com.mojang.blaze3d.platform.InputConstants;
+import com.mojang.brigadier.Command;
+import jp.mtrops.ConfigLoader;
+import jp.mtrops.Net;
+import jp.mtrops.adapter.MtrClientAdapter;
+import jp.mtrops.core.ApiHandler;
+import jp.mtrops.core.ClientStore;
+import jp.mtrops.core.LocalHttpServer;
+import jp.mtrops.core.OpsConfig;
+import jp.mtrops.core.OpsRegistry;
+import jp.mtrops.core.RegistryCodec;
+import jp.mtrops.core.SnapshotCodec;
+import jp.mtrops.core.TopologyCodec;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+import net.fabricmc.fabric.api.networking.v1.PacketByteBufs;
+import net.minecraft.Util;
+import net.minecraft.client.KeyMapping;
+import net.minecraft.client.Minecraft;
+import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.chat.Component;
+import org.lwjgl.glfw.GLFW;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * クライアント側(設計書 §2): サーバーから受け取ったデータをキャッシュし、ローカルHTTP APIで公開する。
+ * HTTPサーバーは 127.0.0.1 のみ。Webアプリ本体もjarに同梱し、同じポートから配信する。
+ */
+public final class OpsClient {
+
+	private static final Logger LOGGER = LoggerFactory.getLogger("mtrops/client");
+
+	public static final ClientStore STORE = new ClientStore();
+
+	private static OpsConfig cfg;
+	private static LocalHttpServer http;
+	private static int httpPort = -1;
+	private static boolean openGuiRequested;
+	private static final Map<String, byte[]> RESOURCE_CACHE = new ConcurrentHashMap<>();
+
+	private OpsClient() {
+	}
+
+	public static void init() {
+		cfg = ConfigLoader.load();
+
+		// --- 受信 ---
+		ClientPlayNetworking.registerGlobalReceiver(Net.TOPOLOGY, (client, handler, buf, sender) -> {
+			final byte[] bytes = buf.readByteArray();
+			try {
+				STORE.setTopology(TopologyCodec.decode(bytes));
+			} catch (IOException | RuntimeException e) {
+				LOGGER.warn("トポロジーの受信に失敗: {}", e.toString());
+			}
+		});
+		ClientPlayNetworking.registerGlobalReceiver(Net.REGISTRY, (client, handler, buf, sender) -> {
+			final byte[] bytes = buf.readByteArray();
+			try {
+				STORE.setRegistry(RegistryCodec.decodeRegistry(bytes));
+			} catch (IOException | RuntimeException e) {
+				LOGGER.warn("車庫台帳の受信に失敗: {}", e.toString());
+			}
+		});
+		ClientPlayNetworking.registerGlobalReceiver(Net.SNAPSHOT, (client, handler, buf, sender) -> {
+			final byte[] bytes = buf.readByteArray();
+			try {
+				STORE.acceptSnapshotPart(SnapshotCodec.decode(bytes));
+			} catch (IOException | RuntimeException e) {
+				LOGGER.warn("スナップショットの受信に失敗: {}", e.toString());
+			}
+		});
+		ClientPlayNetworking.registerGlobalReceiver(Net.EDIT_RESULT, (client, handler, buf, sender) -> {
+			final int code = buf.readInt();
+			final String message = buf.readUtf();
+			STORE.setEditResult(code, message);
+		});
+
+		// --- 接続 / 切断 ---
+		ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+			final FriendlyByteBuf hello = PacketByteBufs.create();
+			hello.writeInt(Net.PROTOCOL);
+			ClientPlayNetworking.send(Net.HELLO, hello);
+			startHttpIfNeeded();
+		});
+		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> STORE.clear());
+		ClientLifecycleEvents.CLIENT_STOPPING.register(client -> stopHttp());
+
+		// --- 操作: キー(既定は未割り当て)とコマンド ---
+		final KeyMapping openKey = KeyBindingHelper.registerKeyBinding(new KeyMapping("key.mtrops.open_manager", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_K, "key.categories.mtrops"));
+		final KeyMapping webKey = KeyBindingHelper.registerKeyBinding(new KeyMapping("key.mtrops.open_web", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_L, "key.categories.mtrops"));
+		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+			while (openKey.consumeClick()) {
+				openGuiRequested = true;
+			}
+			while (webKey.consumeClick()) {
+				// 閲覧だけ(読み取り専用API)なので権限不要。編集の権限はサーバー側で保存時に検査する
+				if (httpPort > 0) {
+					Util.getPlatform().openUri(webUrl());
+				} else if (client.player != null) {
+					client.player.displayClientMessage(Component.literal("運行情報Web: " + webUrl()), true);
+				}
+			}
+			// チャット画面が閉じた後に開く必要があるため、次のtickで開く
+			if (openGuiRequested && client.player != null) {
+				openGuiRequested = false;
+				client.setScreen(new DepotManagerScreen());
+			}
+		});
+
+		ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> dispatcher.register(
+				ClientCommandManager.literal("mtrops")
+						.executes(ctx -> {
+							openGuiRequested = true;
+							return Command.SINGLE_SUCCESS;
+						})
+						.then(ClientCommandManager.literal("web").executes(ctx -> {
+							final String url = webUrl();
+							ctx.getSource().sendFeedback(Component.literal("運行情報Web: " + url));
+							if (httpPort > 0) {
+								Util.getPlatform().openUri(url);
+							}
+							return Command.SINGLE_SUCCESS;
+						}))
+						.then(ClientCommandManager.literal("url").executes(ctx -> {
+							ctx.getSource().sendFeedback(Component.literal("運行情報Web: " + webUrl()));
+							return Command.SINGLE_SUCCESS;
+						}))
+						.then(ClientCommandManager.literal("status").executes(ctx -> {
+							final OpsRegistry reg = STORE.registry();
+							ctx.getSource().sendFeedback(Component.literal(
+									"mtrops: 接続=" + (STORE.live() != null) + " / 列車=" + (STORE.live() == null ? 0 : STORE.live().trains.size())
+											+ " / 台帳の車庫=" + reg.depots.size() + " / HTTP=" + webUrl()));
+							return Command.SINGLE_SUCCESS;
+						}))));
+	}
+
+	// ------------------------------------------------------------------ HTTP
+
+	public static String webUrl() {
+		return httpPort > 0 ? "http://127.0.0.1:" + httpPort + "/" : "(HTTPサーバーは起動していません)";
+	}
+
+	private static synchronized void startHttpIfNeeded() {
+		if (http != null || !cfg.httpEnabled) {
+			return;
+		}
+		for (int port = cfg.httpPort; port < cfg.httpPort + 10; port++) {
+			try {
+				final LocalHttpServer server = new LocalHttpServer(port, new ApiHandler(STORE, MtrClientAdapter::typeName), OpsClient::readResource, cfg.allowedOrigins);
+				server.start();
+				http = server;
+				httpPort = server.port();
+				LOGGER.info("ローカル運行情報APIを起動しました: http://127.0.0.1:{}/", httpPort);
+				return;
+			} catch (IOException e) {
+				// ポート使用中(複数インスタンス起動など)。次のポートを試す。
+			}
+		}
+		LOGGER.warn("ローカルHTTPサーバーを起動できませんでした(ポート {}〜{} が使用中)", cfg.httpPort, cfg.httpPort + 9);
+	}
+
+	private static synchronized void stopHttp() {
+		if (http != null) {
+			http.stop();
+			http = null;
+			httpPort = -1;
+		}
+	}
+
+	private static byte[] readResource(String path) {
+		final byte[] cached = RESOURCE_CACHE.get(path);
+		if (cached != null) {
+			return cached.length == 0 ? null : cached;
+		}
+		byte[] data;
+		try (InputStream in = OpsClient.class.getResourceAsStream("/assets/mtrops/web/" + path)) {
+			data = in == null ? new byte[0] : in.readAllBytes();
+		} catch (IOException e) {
+			data = new byte[0];
+		}
+		RESOURCE_CACHE.put(path, data);
+		return data.length == 0 ? null : data;
+	}
+}

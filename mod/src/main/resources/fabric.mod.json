@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "mtrops",
+  "version": "${version}",
+  "name": "MTR Ops",
+  "description": "MTRmod 3.2.2-hotfix-1 のリアルタイム運行監視と、車庫・編成・車番の管理。ローカルHTTP APIと運行情報Webアプリを提供します。",
+  "authors": [],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["jp.mtrops.MtrOpsMod"],
+    "client": ["jp.mtrops.client.MtrOpsClientMod"]
+  },
+  "depends": {
+    "fabricloader": ">=0.14.9",
+    "minecraft": "1.19.2",
+    "java": ">=17",
+    "fabric-api": "*",
+    "mtr": "*"
+  }
+}
