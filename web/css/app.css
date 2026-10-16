@@ -44,30 +44,31 @@ button,.tab,.lsym,.lcard,.tr,.act{touch-action:manipulation;-webkit-tap-highligh
 .view{max-width:1240px;margin:0 auto;padding:6px 20px 48px}
 @media(max-width:859px){.view{padding:4px 12px 36px}.banner{margin:10px 12px 0}}
 
-/* ---- 路線シンボル(丸いライン記号) ---- */
-.lsym{--sz:64px;flex:none;width:var(--sz);height:var(--sz);border-radius:50%;background:var(--c);border:0;padding:0;display:grid;place-items:center;position:relative}
-.lsym i{font-style:normal;width:76%;height:76%;border-radius:50%;background:#fff;color:#111;display:grid;place-items:center;font-weight:900;font-size:calc(var(--sz) * .42);line-height:1;letter-spacing:-.02em;overflow:hidden;white-space:nowrap}
-.lsym i.two{font-size:calc(var(--sz) * .3)}.lsym i.long{font-size:calc(var(--sz) * .22)}
-.lsym.sm{--sz:30px}.lsym.md{--sz:44px}.lsym.xl{--sz:132px}
-.lsym .tbadge{position:absolute;right:-2px;top:-2px;width:16px;height:16px;border-radius:50%;background:var(--bad);border:2px solid var(--card)}
+/* ---- 路線シンボル(文字なしの路線色の丸) ---- */
+.lsym{--sz:36px;flex:none;width:var(--sz);height:var(--sz);border-radius:50%;background:var(--c);border:0;padding:0;display:block;position:relative}
+.lsym.sm{--sz:22px}.lsym.md{--sz:34px}.lsym.xl{--sz:72px}
+.lsym .tbadge{position:absolute;right:-2px;top:-2px;width:14px;height:14px;border-radius:50%;background:var(--bad);border:2px solid var(--card)}
 .lsym .tbadge.s-delay{background:var(--warn)}.lsym .tbadge.s-stopped{background:var(--stop)}
 
-/* ---- ホーム: 路線セレクタ ---- */
-.picker{position:relative;margin:10px -20px 0}
-.strip{display:flex;align-items:center;gap:18px;overflow-x:auto;padding:14px 60px 8px;scrollbar-width:none;scroll-behavior:smooth}
-.strip::-webkit-scrollbar{display:none}
-.strip .lsym{opacity:.9;transition:transform .15s}.strip .lsym:hover{transform:scale(1.08);opacity:1}
-.strip .lsym.sel{--sz:132px;opacity:1;margin:0 14px;box-shadow:0 8px 22px -10px rgba(0,30,70,.55)}
-.strip .lsym.sel:hover{transform:none}
-.pbtn{position:absolute;top:50%;margin-top:-22px;width:44px;height:44px;border-radius:50%;border:1px solid var(--line);background:var(--card);box-shadow:var(--shadow);font-size:18px;z-index:2;color:var(--navy)}
-.pbtn.l{left:10px}.pbtn.r{right:10px}
-.pmore{display:block;margin:4px auto 0;border:0;background:none;color:var(--accent);font-weight:700;font-size:13px;padding:6px 12px}
-@media(max-width:859px){.picker{margin:8px -12px 0}.strip{padding:12px 44px 6px;gap:12px}.strip .lsym.sel{--sz:104px}}
-.lname{text-align:center;font-size:30px;font-weight:800;margin:6px 0 2px;letter-spacing:.02em}
+/* ---- ホーム: 左に路線リスト・右に詳細 ---- */
+.hsplit{display:grid;grid-template-columns:300px minmax(0,1fr);gap:26px;align-items:start;margin-top:14px}
+.lside{position:sticky;top:78px}
+.lside .search{margin:0 0 10px;border-radius:12px;max-width:none}
+.llist{position:relative;display:flex;flex-direction:column;gap:6px;overflow-y:auto;max-height:calc(100vh - 170px);padding:2px 4px 4px 2px}
+.litem{display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:1px solid var(--line);background:var(--card);border-radius:12px;padding:9px 12px}
+.litem[hidden],.lcard[hidden]{display:none}
+.litem:hover{border-color:var(--c)}
+.litem.sel{border-color:var(--c);background:color-mix(in srgb,var(--c) 14%,var(--card));box-shadow:inset 5px 0 0 var(--c)}
+.ltx{flex:1;min-width:0}.ltx b{display:block;font-size:15px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ltx small{display:block;color:var(--sub);font-size:11.5px;margin-top:1px}
+.litem .chip{font-size:11px;padding:1px 7px}
+.hmain{min-width:0}
+.lhead{display:flex;align-items:center;gap:18px;margin:2px 0 4px}
+.lname{font-size:30px;font-weight:800;letter-spacing:.02em;line-height:1.2}
 .lname small{display:block;font-size:12.5px;font-weight:600;color:var(--sub);letter-spacing:.04em;margin-top:2px}
+@media(max-width:859px){.hsplit{grid-template-columns:1fr;gap:12px}.lside{position:static}.llist{max-height:220px}.lname{font-size:24px}.lsym.xl{--sz:52px}}
 
 /* ---- 運行状況 ---- */
-.stat{max-width:760px;margin:18px auto 0}
+.stat{max-width:760px;margin:14px 0 0}
 .stat-h{display:flex;align-items:center;gap:12px;border-bottom:2px solid var(--accent);padding:0 4px 8px;color:var(--navy)}
 :root[data-theme=dark] .stat-h,:root:not([data-theme=light]) .stat-h{color:var(--accent)}
 .ring{flex:none;width:34px;height:34px;border-radius:50%;border:7px solid var(--rc,var(--ring))}
@@ -113,7 +114,7 @@ button,.tab,.lsym,.lcard,.tr,.act{touch-action:manipulation;-webkit-tap-highligh
 .empty{padding:26px 10px;text-align:center;color:var(--sub)}
 
 /* ---- アクションタイル ---- */
-.acts{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;max-width:760px;margin:22px auto 0}
+.acts{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;max-width:760px;margin:22px 0 0}
 .act{border:0;background:none;display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px 4px;font-weight:700;font-size:14px;line-height:1.3;color:var(--accent);border-radius:12px}
 .act:hover{background:var(--soft)}
 .act svg{width:40px;height:40px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
@@ -170,8 +171,8 @@ h2.sec::after{content:"";flex:1;height:1px;background:var(--line)}
 /* ---- モーダル(列車詳細情報 / 駅一覧 / 駅間距離) ---- */
 .modal{position:fixed;inset:0;z-index:60;background:rgba(8,20,36,.5);display:flex;align-items:center;justify-content:center;padding:16px}
 .modal[hidden]{display:none}
-.mbox{background:var(--card);border-radius:18px;width:min(520px,100%);max-height:min(92vh,880px);overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.4);position:relative}
-.mbox.wide{width:min(680px,100%)}
+.mbox{background:var(--card);border-radius:18px;width:min(560px,100%);max-height:min(92vh,880px);overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.4);position:relative}
+.mbox.wide{width:min(860px,100%)}
 .mh{position:sticky;top:0;z-index:5;background:var(--card);text-align:center;font-weight:800;font-size:17px;padding:16px 48px 12px;border-bottom:3px solid var(--c,var(--navy))}
 .mh .x{position:absolute;right:10px;top:10px;width:36px;height:36px;border:0;background:none;font-size:26px;line-height:1;color:var(--sub);border-radius:50%}
 .mh .x:hover{background:var(--soft)}
@@ -193,16 +194,24 @@ h2.sec::after{content:"";flex:1;height:1px;background:var(--line)}
 .trow .nm small{display:block;font-size:11px;color:var(--sub);font-weight:500}
 .trow .tag{font-size:11.5px;font-weight:700;padding:2px 9px;border-radius:9px;background:var(--c);color:#fff;white-space:nowrap}
 .trow .tag.stop{background:var(--ok)}
+.trow.hascars{flex-wrap:wrap;padding:6px 0}
+.trow .tm{margin-left:auto;text-align:right;font:800 18px/1.1 var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.trow .tm small{display:block;font:600 9.5px/1.2 var(--font);color:var(--sub);letter-spacing:.04em}
+.trow .tm.late{color:var(--bad)}
+.trow .nm{min-width:130px;flex:0 1 auto}
+.trow:not(.hascars) .nm{flex:1}
 .trow.past{opacity:.5}
 .trow.past .nd{border-color:color-mix(in srgb,var(--c) 45%,#999)}
 .trow.fold{min-height:34px;color:var(--sub);font-size:12px}
 .trow.fold .nd{width:14px;height:14px;border-width:3px;margin-left:16px;margin-right:9px}
 .tblock{display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding:10px 0 10px 54px;position:relative;z-index:2}
 .tblock.atnode{padding-left:0;margin-top:-4px}
-.cars{display:flex;gap:3px;align-items:stretch}
-.car{width:38px;padding:4px 0 3px;border-radius:4px;background:color-mix(in srgb,var(--c) 85%,#000 0%);color:#fff;text-align:center;font-weight:800;font-size:13px;line-height:1.1;border:1.5px solid var(--c)}
-.car small{display:block;font:600 8.5px/1.1 var(--mono);opacity:.9;overflow:hidden;white-space:nowrap}
-.nose{width:14px;margin-right:-6px;background:var(--c);clip-path:polygon(100% 0,0 50%,100% 100%)}
+.cars{display:flex;flex-wrap:wrap;gap:4px;align-items:stretch;min-width:0}
+.cars.inrow{flex:1 1 260px}
+.car{width:54px;padding:4px 2px 3px;border-radius:4px;background:color-mix(in srgb,var(--c) 85%,#000 0%);color:#fff;text-align:center;font-weight:800;font-size:13px;line-height:1.1;border:1.5px solid var(--c)}
+.car b{display:block;font-size:13px}
+.car small{display:block;font:600 9.5px/1.2 var(--mono);opacity:.92;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-height:1.2em}
+.nose{width:14px;min-height:30px;margin-right:-2px;background:var(--c);clip-path:polygon(100% 0,0 50%,100% 100%)}
 .nose.rev{order:2;transform:scaleX(-1);margin:0 0 0 -6px}
 .tstate{font-size:12.5px;font-weight:700;color:var(--c);display:flex;flex-wrap:wrap;gap:2px 12px}
 .mdl{padding:4px 20px 16px}

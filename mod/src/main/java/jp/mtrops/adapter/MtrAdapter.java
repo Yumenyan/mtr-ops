@@ -183,6 +183,7 @@ public final class MtrAdapter {
 			s.idealTicks = idealTicks(segments, s.railProgress, s.atStop, t.getElapsedDwellTicks());
 			s.idealNextArrivalTicks = s.atStop ? Double.NaN : idealNextArrival(segments, s.railProgress);
 			s.elapsedTicks = tracker.elapsed(s.id, true, nowTick, s.idealTicks);
+			fillEtas(s, segments, dc);
 		} else {
 			tracker.elapsed(s.id, false, nowTick, Double.NaN);
 		}
@@ -209,6 +210,40 @@ public final class MtrAdapter {
 		} catch (RuntimeException ignored) {
 		}
 		return Double.NaN;
+	}
+
+	/** 現在位置より先にある停車駅(ホームのある区間の終点)への、ダイヤ上の残りtick。 */
+	private static void fillEtas(TrainSample s, List<Siding.TimeSegment> segments, DataCache dc) {
+		if (Double.isNaN(s.idealTicks)) {
+			return;
+		}
+		final long[] ids = new long[TrainSample.MAX_ETAS];
+		final int[] ticks = new int[TrainSample.MAX_ETAS];
+		int n = 0;
+		try {
+			for (final Siding.TimeSegment seg : segments) {
+				if (n >= ids.length) {
+					break;
+				}
+				if (seg.savedRailBaseId == 0 || seg.endRailProgress <= s.railProgress + 0.5) {
+					continue;
+				}
+				final Station st = dc.platformIdToStation.get(seg.savedRailBaseId);
+				if (st == null || (n > 0 && ids[n - 1] == st.id)) {
+					continue;
+				}
+				final double remain = seg.endTime - s.idealTicks;
+				if (Double.isNaN(remain) || Double.isInfinite(remain)) {
+					continue;
+				}
+				ids[n] = st.id;
+				ticks[n] = (int) Math.max(0, Math.min(Integer.MAX_VALUE, Math.round(remain)));
+				n++;
+			}
+		} catch (RuntimeException ignored) {
+		}
+		s.etaStationIds = java.util.Arrays.copyOf(ids, n);
+		s.etaTicks = java.util.Arrays.copyOf(ticks, n);
 	}
 
 	private static double idealNextArrival(List<Siding.TimeSegment> segments, double progress) {

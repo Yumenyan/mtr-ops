@@ -53,6 +53,11 @@ public final class TrainSample {
 	public static final int SUSPECT_FROZEN = 1;
 	public static final int SUSPECT_NOPATH = 2;
 
+	/** これから着く停車駅と、そこへの到着までの残り(tick)。ダイヤ上の時間なので、遅れていても timetable 通りの走行を前提にした見込み。 */
+	public long[] etaStationIds = new long[0];
+	public int[] etaTicks = new int[0];
+	public static final int MAX_ETAS = 24;
+
 	public String formationId;
 	public String series;
 

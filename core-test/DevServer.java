@@ -397,6 +397,22 @@ public class DevServer {
 			t.nextStationId = l.sts.get(next).id();
 			t.prevStationId = l.sts.get((next - 1 + l.sts.size()) % l.sts.size()).id();
 		}
+		{	// 到着見込み(疑似): 15m/s + 各駅15秒停車
+			final int n = l.sts.size();
+			int first = s.atStop ? (indexNear(l, s.pos) + 1) : next;
+			double ticks = s.atStop ? s.dwellLeftTicks : 0;
+			double dd = s.atStop ? 0 : d[0];
+			final List<Long> ids = new ArrayList<>(); final List<Integer> tk = new ArrayList<>();
+			for (int k = 0; k < Math.min(n, TrainSample.MAX_ETAS); k++) {
+				final int idx = first + k;
+				if (!l.loop && idx >= n) break;
+				if (k > 0 || s.atStop) dd = dist(l.sts.get((idx - 1 + n) % n), l.sts.get(idx % n));
+				ticks += dd / 15.0 * 20 + (k > 0 ? 15 * 20 : 0);
+				ids.add(l.sts.get(idx % n).id()); tk.add((int) ticks);
+			}
+			t.etaStationIds = ids.stream().mapToLong(Long::longValue).toArray();
+			t.etaTicks = tk.stream().mapToInt(Integer::intValue).toArray();
+		}
 
 		t.idealTicks = 0;
 		t.elapsedTicks = s.delaySec * 20.0;

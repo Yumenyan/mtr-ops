@@ -56,6 +56,7 @@ public class CoreSelfTest {
 		httpTests();
 		geometryTests();
 		entryMatcherTests();
+		etaTests();
 		System.out.println("\n" + passed + " passed, " + failed + " failed");
 		System.exit(failed == 0 ? 0 : 1);
 	}
@@ -609,6 +610,17 @@ public class CoreSelfTest {
 		check(EntryMatcher.match(snap, topo, 5, 4, 0).s.id == 103, "停車中の列車が先頭");
 		snap.trains.get(2).s.atStop = false; snap.trains.get(2).s.nextStationId = 3; snap.trains.get(2).s.x = 3300;
 		check(EntryMatcher.candidates(snap, topo, 5, 2).size() == 1, "通り過ぎた列車は候補にならない(駅2は102のみ)");
+	}
+
+	static void etaTests() throws Exception {
+		System.out.println("[eta]");
+		final Snapshot snap = new Snapshot();
+		final TrainView v = new TrainView();
+		v.s.id = 1; v.s.etaStationIds = new long[]{5, 6}; v.s.etaTicks = new int[]{200, 1500};
+		snap.trains.add(v);
+		final SnapshotCodec.Part p = SnapshotCodec.decode(SnapshotCodec.encode(snap, 4, 900000).get(0));
+		final TrainSample r = p.snapshot.trains.get(0).s;
+		check(r.etaStationIds.length == 2 && r.etaStationIds[1] == 6 && r.etaTicks[1] == 1500, "到着見込み(駅ID+残りtick)が符号化で往復する");
 	}
 
 	private static class Part0 {
