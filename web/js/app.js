@@ -565,6 +565,9 @@
     const dc = colOf(t.status);
     const nCars = t.cars || 0;
     const etaOf = new Map((t.etas || []).map(e => [String(e.stationId), e]));
+    // 到着予想は現実の時刻(この画面を開いている端末の時計)。残り秒数は最後に受信した時点からの値。
+    const etaClock = sec => { const d = new Date((S.lastOk || Date.now()) + sec * 1000); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+    const etaIn = sec => { const rest = Math.max(0, Math.round(sec - (Date.now() - (S.lastOk || Date.now())) / 1000)); return rest < 60 ? `あと${rest}秒` : `あと${Math.floor(rest / 60)}分${pad2(rest % 60)}秒`; };
     const carLabel = i => { const raw = (t.carNumbers || [])[i] || ''; const m = raw.match(/(\d+)\s*$/); return m ? m[1] : raw; };
     const carsEl = cls => h('div', { class: 'cars ' + (cls || ''), style: `--c:${color}` },
       h('span', { class: 'nose' }),
@@ -575,7 +578,7 @@
       return h('div', { class: 'trow ' + (cls || '') + (withCars ? ' hascars' : '') }, h('div', { class: 'nd' }, codeEls(stationCode(letters, ids[i]))),
         h('div', { class: 'nm' }, jp(s0.name), en(s0.name) ? h('small', null, en(s0.name)) : null),
         withCars ? carsEl('inrow') : null,
-        eta ? h('span', { class: 'tm' + ((t.delaySec || 0) >= 60 ? ' late' : '') }, eta.clock, h('small', null, '到着予想')) : null,
+        eta ? h('span', { class: 'tm' + ((t.delaySec || 0) >= 60 ? ' late' : '') }, etaClock(eta.sec), h('small', null, etaIn(eta.sec))) : null,
         tag ? h('span', { class: 'tag ' + (tagCls || '') }, tag) : null);
     };
     if (tp) {
@@ -606,7 +609,7 @@
         t.manual ? h('div', { class: 'meta' }, '手動運転中(遅れ判定の対象外)') : null),
       h('div', { class: 'drow' }, chip(t.status), h('div', { class: `late s-${dc === 'ok' ? 'normal' : t.status}` }, `遅れ：${lateTxt}`)),
       h('div', { class: 'msec' }, tp ? tl : h('div', { class: 'nodata' }, 'この列車の位置を路線上で特定できません(詳細レベルが低いか、路線外です)。'),
-        tp && etaOf.size ? h('div', { class: 'nodata', style: 'margin-top:8px' }, '到着予想はダイヤ上の残り時間から計算した、ゲーム内時刻です。') : null),
+        tp && etaOf.size ? h('div', { class: 'nodata', style: 'margin-top:8px' }, '到着予想は、ダイヤ上の残り時間から計算した現実の時刻です。') : null),
       h('div', { class: 'mdl' }, h('dl', { class: 'dl' }, dl.map(([k, v]) => [h('dt', null, k), h('dd', null, v)]))),
       h('div', { class: 'msec nodata' }, '容量の都合で省略された項目は表示されません。')], color, true);
   }
