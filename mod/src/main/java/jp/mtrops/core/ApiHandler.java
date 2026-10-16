@@ -678,6 +678,20 @@ public final class ApiHandler {
 				w.field("destination", route.destination);
 			}
 		}
+		if (level >= 1 && s.etaStationIds.length > 0) {
+			w.name("etas").beginArray();
+			for (int i = 0; i < s.etaStationIds.length; i++) {
+				final Topology.Station es = stationMap.get(s.etaStationIds[i]);
+				w.beginObject().idField("stationId", s.etaStationIds[i]);
+				if (es != null) {
+					w.field("station", es.name);
+				}
+				w.field("sec", s.etaTicks[i] / 20);
+				w.field("clock", clock((int) (snap.dayTime + s.etaTicks[i])));
+				w.endObject();
+			}
+			w.endArray();
+		}
 		if (level >= 2) {
 			w.field("y", s.y, 1);
 			if (!Float.isNaN(s.yaw)) {

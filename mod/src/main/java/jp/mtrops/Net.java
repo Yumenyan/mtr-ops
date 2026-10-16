@@ -18,7 +18,7 @@ import net.minecraft.resources.ResourceLocation;
 public final class Net {
 
 	public static final String MOD_ID = "mtrops";
-	public static final int PROTOCOL = 6;
+	public static final int PROTOCOL = 7;
 
 	public static final ResourceLocation HELLO = new ResourceLocation(MOD_ID, "hello");
 	public static final ResourceLocation TOPOLOGY = new ResourceLocation(MOD_ID, "topology");

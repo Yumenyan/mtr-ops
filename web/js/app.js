@@ -68,7 +68,7 @@
   const S = {
     live: null, routes: [], stations: new Map(), routeMap: new Map(), formations: [], depots: [],
     ghosts: { suspects: [], past: [] }, topoRev: -1, ok: false, lastOk: 0, err: '', trains: new Map(), routeLive: new Map(),
-    groups: [], groupByRoute: new Map(), groupByKey: new Map(), selKey: '', zoom: false, distSel: '', distCache: new Map()
+    groups: [], groupsRev: 0, groupByRoute: new Map(), groupByKey: new Map(), selKey: '', zoom: false, distSel: '', distCache: new Map()
   };
   const route = id => S.routeMap.get(String(id));
   const station = id => S.stations.get(String(id));
@@ -103,30 +103,38 @@
     polling = false; render();
   }
 
-  // ---------- 路線のまとめ: 同じ路線名(括弧書きを除く)の路線は1本の「ライン」に自動でマージする ----------
+  // ---------- 路線のまとめ: 同じ路線名(括弧書きを除く)・同じナンバリング記号の路線は1本の「ライン」に自動でマージする ----------
   const baseName = r => jp(r.name).replace(/[(（][^)）]*[)）]/g, '').replace(/\s+/g, ' ').trim() || jp(r.name) || String(r.id);
   const nameKey = r => baseName(r).replace(/\s+/g, '').toLowerCase();
   function buildGroups() {
-    const map = new Map();
+    const parent = new Map(S.routes.map(r => [String(r.id), String(r.id)]));
+    const find = x => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
+    const union = (a, b) => { a = find(a); b = find(b); if (a !== b) parent.set(b, a); };
+    const byName = new Map(), byLetter = new Map();
     for (const r of S.routes) {
-      const key = nameKey(r); let g = map.get(key);
-      if (!g) { g = { key, members: [], ids: new Set(), name: baseName(r) }; map.set(key, g); }
-      g.members.push(r); g.ids.add(String(r.id));
+      const id = String(r.id);
+      const nk = nameKey(r); if (byName.has(nk)) union(byName.get(nk), id); else byName.set(nk, id);
+      for (const l of routeLetters(r)) { if (byLetter.has(l)) union(byLetter.get(l), id); else byLetter.set(l, id); }
     }
+    const map = new Map();
+    for (const r of S.routes) { const k = find(String(r.id)); let g = map.get(k); if (!g) { g = { members: [], ids: new Set() }; map.set(k, g); } g.members.push(r); g.ids.add(String(r.id)); }
+    const out = [];
     for (const g of map.values()) {
       g.members.sort((a, b) => (b.stationIds || []).length - (a.stationIds || []).length);
       g.rep = g.members[0];
-      const counts = new Map();
-      for (const m of g.members) for (const l of routeLetters(m)) counts.set(l, (counts.get(l) || 0) + 1);
-      g.letters = routeLetters(g.rep).concat([...counts.keys()].filter(l => !routeLetters(g.rep).includes(l)));
-      g.letter = g.letters[0] || '';
-      g.color = g.rep.color;
-      g._chain = null;
+      g.key = 'g' + [...g.ids].sort()[0];
+      g.name = g.members.map(baseName).filter(Boolean).sort((a, b) => a.length - b.length)[0] || baseName(g.rep);
+      const letters = routeLetters(g.rep).slice();
+      for (const m of g.members) for (const l of routeLetters(m)) if (!letters.includes(l)) letters.push(l);
+      g.letters = letters; g.letter = letters[0] || '';
+      g.color = g.rep.color; g._chain = null;
+      out.push(g);
     }
-    S.groups = [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'ja'));
-    S.groupByKey = map;
+    S.groups = out.sort((a, b) => a.name.localeCompare(b.name, 'ja') || a.key.localeCompare(b.key));
+    S.groupByKey = new Map(S.groups.map(g => [g.key, g]));
     S.groupByRoute = new Map();
     for (const g of S.groups) for (const id of g.ids) S.groupByRoute.set(id, g);
+    S.groupsRev++;
   }
   function groupAgg(g) {
     const a = { trainCount: 0, maxDelaySec: 0, status: 'normal', delayed: 0 };
@@ -137,15 +145,9 @@
     }
     return a;
   }
-  // 路線記号。駅ナンバリングの英字があればそれ、無ければ系統番号、無ければ路線名の先頭1文字
-  function symbolText(g) {
-    const t = g.letter || (g.rep.number || '') || [...g.name][0] || '?';
-    return t;
-  }
+  // 路線シンボル: 文字なしの路線色の丸
   function lsym(g, cls, onclick, badge) {
-    const t = symbolText(g);
-    return h('button', { class: `lsym ${cls || ''}`, style: `--c:${g.color}`, type: 'button', title: g.name, 'aria-label': g.name, onclick },
-      h('i', { class: t.length > 3 ? 'long' : t.length > 1 ? 'two' : '' }, t),
+    return h(onclick ? 'button' : 'span', { class: `lsym ${cls || ''}`, style: `--c:${g.color}`, type: onclick ? 'button' : null, title: g.name, 'aria-label': g.name, onclick },
       badge && badge !== 'normal' ? h('span', { class: `tbadge s-${badge}` }) : null);
   }
   // ライン全体の駅の並び: 駅ナンバリングがあればその順、無ければ最長の系統。他の系統にしかない駅は元の並びを保って差し込む。
@@ -263,7 +265,7 @@
   // ---------- ホーム(路線セレクタ・運行状況・列車位置) ----------
   const SP_BASE = 210, PAD = 96;                    // 駅間(px)。詰まっても列車を重ねず、縦の段に積むので広めに取る
   const TRAIN_SVG = '<svg viewBox="0 0 76 30" aria-hidden="true"><rect x="2" y="3" width="62" height="24" rx="8" fill="currentColor"/><rect x="10" y="9" width="38" height="9" rx="4" fill="#fff" fill-opacity=".86"/><path d="M62 3 74 15 62 27z" fill="#26292e"/></svg>';
-  let lastSel = '', stripScroll = 0, dscrollLeft = {}, dscrollInit = new Set();
+  let dscrollLeft = {}, dscrollInit = new Set();
 
   function pickGroup(arg) {
     if (arg) { const g = S.groupByRoute.get(String(arg)) || S.groupByKey.get(arg); if (g) { S.selKey = g.key; return g; } }
@@ -281,18 +283,6 @@
     if (a.status === 'stopped') return `${g.name}は現在、停止している列車があります。${late}`;
     if (a.status === 'bigDelay') return `${g.name}は現在、大幅に遅れている列車があります。${late}`;
     return `${g.name}は現在、一部の列車に遅れが出ています。${late}`;
-  }
-  function pickerEl(sel) {
-    const MAXN = 60;
-    let list = S.groups.slice(0, MAXN);
-    if (!list.includes(sel)) list = list.slice(0, MAXN - 1).concat(sel);
-    const strip = h('div', { class: 'strip', id: 'strip' },
-      list.map(g => { const a = groupAgg(g); return lsym(g, g === sel ? 'sel' : '', () => go('home', g.rep.id), g === sel ? null : a.status); }));
-    const by = d => { strip.scrollBy({ left: d * 360 }); };
-    return h('div', { class: 'picker' },
-      h('button', { class: 'pbtn l', type: 'button', 'aria-label': '前の路線', onclick: () => by(-1) }, '‹'), strip,
-      h('button', { class: 'pbtn r', type: 'button', 'aria-label': '次の路線', onclick: () => by(1) }, '›'),
-      S.groups.length > list.length ? h('button', { class: 'pmore', type: 'button', onclick: () => go('lines') }, `ほか${S.groups.length - list.length}路線(路線一覧で探す)`) : null);
   }
   function positionEl(g) {
     const chain = chainOf(g); const ids = chain.ids; const SP = S.zoom ? SP_BASE * 1.45 : SP_BASE;
@@ -353,13 +343,43 @@
     ['fleet', '車両一覧', '<rect x="3" y="6" width="18" height="10" rx="3"/><path d="M7 20l1-4M17 20l-1-4M3 11h18"/>'],
     ['ghost', 'スタック調査', '<path d="M5 20V10a7 7 0 0 1 14 0v10l-3-2-2 2-2-2-2 2-2-2z M9.5 11h.01 M14.5 11h.01"/>']
   ];
-  function viewHome(arg) {
-    if (!S.groups.length) return h('div', { class: 'empty' }, S.ok ? '路線データを待っています…' : 'MODに接続すると路線が表示されます');
-    const g = pickGroup(arg); const a = groupAgg(g);
+  const metaOf = a => `${a.trainCount}本運行${a.maxDelaySec >= 60 ? ` ・最大${Math.round(a.maxDelaySec / 60)}分遅れ` : ''}`;
+  const setChip = (el, k) => { const c = `chip s-${k}`; if (el.className !== c) el.className = c; const t = `${st(k).mark} ${st(k).short}`; if (el.textContent !== t) el.textContent = t; };
+  const matchGroup = (g, q) => { const w = q.toLowerCase().trim().split(/[\s\u3000]+/).filter(Boolean); const text = (g.name + ' ' + g.members.map(m => `${m.name} ${m.number || ''}`).join(' ')).toLowerCase(); return w.every(x => text.includes(x)); };
+  // 左の路線リストは一度だけ作り、以後は文字と色を書き換えるだけにする(並びも固定。作り直し・並べ替えをしないのでスクロールや選択が動かない)
+  const HOME = { root: null, rev: -1, list: null, main: null, items: new Map(), q: '', listScroll: 0, lastSel: '', mainKey: '' };
+  function buildHomeRoot() {
+    HOME.items = new Map();
+    const search = h('input', { class: 'search lsearch', type: 'search', placeholder: '路線を検索', value: HOME.q, 'aria-label': '路線を検索',
+      oninput: e => { HOME.q = e.target.value; for (const [k, it] of HOME.items) it.el.hidden = !matchGroup(S.groupByKey.get(k), HOME.q); } });
+    const list = h('div', { class: 'llist', onscroll: e => { HOME.listScroll = e.target.scrollTop; } });
+    for (const g of S.groups) {
+      const meta = h('small'), badge = h('span');
+      const el = h('button', { class: 'litem', type: 'button', style: `--c:${g.color}`, hidden: !matchGroup(g, HOME.q), onclick: () => go('home', g.rep.id) },
+        lsym(g, 'md'), h('span', { class: 'ltx' }, h('b', null, g.name), meta), badge);
+      HOME.items.set(g.key, { el, meta, badge }); list.append(el);
+    }
+    HOME.list = list; HOME.main = h('div', { class: 'hmain' });
+    HOME.root = h('div', { class: 'hsplit' }, h('aside', { class: 'lside' }, search, list), HOME.main);
+    HOME.rev = S.groupsRev; HOME.lastSel = ''; HOME.mainKey = '';
+  }
+  function updateHomeList(sel) {
+    for (const g of S.groups) {
+      const it = HOME.items.get(g.key); if (!it) continue; const a = groupAgg(g);
+      const m = metaOf(a); if (it.meta.textContent !== m) it.meta.textContent = m;
+      setChip(it.badge, a.status);
+      it.el.classList.toggle('sel', g === sel);
+    }
+    if (HOME.lastSel !== sel.key) {
+      HOME.lastSel = sel.key; const it = HOME.items.get(sel.key), L = HOME.list;
+      if (it) { if (it.el.offsetTop < L.scrollTop) L.scrollTop = it.el.offsetTop - 8; else if (it.el.offsetTop + it.el.offsetHeight > L.scrollTop + L.clientHeight) L.scrollTop = it.el.offsetTop + it.el.offsetHeight - L.clientHeight + 8; HOME.listScroll = L.scrollTop; }
+    }
+  }
+  function mainHome(g) {
+    const a = groupAgg(g);
     const sub = g.members.length > 1 ? `${g.members.length}系統をまとめて表示` : (g.rep.destination ? `${jp(g.rep.destination)}方面` : '');
     return h('div', null,
-      pickerEl(g),
-      h('div', { class: 'lname' }, g.name, sub ? h('small', null, sub) : null),
+      h('div', { class: 'lhead' }, lsym(g, 'xl'), h('div', { class: 'lname' }, g.name, sub ? h('small', null, sub) : null)),
       h('div', { class: 'stat' },
         h('div', { class: 'stat-h' }, h('span', { class: `ring s-${a.status}` }), h('b', null, st(a.status).label), a.status === 'normal' ? null : chip(a.status)),
         h('p', null, statusText(g, a)),
@@ -368,31 +388,62 @@
       h('div', { class: 'acts' }, ACTS.map(([id, label, p]) => h('button', { class: 'act', type: 'button',
         onclick: () => (id === 'fleet' || id === 'ghost') ? go(id) : go('home', g.rep.id, '', '', id) }, icon(p), h('span', null, label)))));
   }
-
-  // ---------- 路線一覧 ----------
-  let lineQ = '', lineFilter = 'all', refillLines = null;
-  function viewLines() {
-    const note = h('div', { class: 'nodata' }); const grid = h('div', { class: 'grid' }); const pills = h('div', { class: 'pills' });
-    const input = h('input', { class: 'search', type: 'search', placeholder: '路線名で検索', value: lineQ, 'aria-label': '路線を検索', oninput: e => { lineQ = e.target.value; fill(); } });
-    function fill() {
-      pills.replaceChildren(...[['all', 'すべて'], ['running', '運行中'], ['trouble', '乱れあり']].map(([k, l]) =>
-        h('button', { class: 'pill', type: 'button', 'aria-pressed': String(lineFilter === k), onclick: () => { lineFilter = k; fill(); } }, l)));
-      const words = lineQ.toLowerCase().trim().split(/[\s　]+/).filter(Boolean);
-      let gs = S.groups.map(g => ({ g, a: groupAgg(g) })).filter(({ g, a }) => {
-        const text = g.members.map(m => `${m.name} ${m.number || ''}`).join(' ').toLowerCase();
-        if (!words.every(w => text.includes(w))) return false;
-        if (lineFilter === 'running') return a.trainCount > 0;
-        if (lineFilter === 'trouble') return a.status !== 'normal';
-        return true;
-      });
-      gs.sort((x, y) => st(y.a.status).rank - st(x.a.status).rank || x.g.name.localeCompare(y.g.name, 'ja'));
-      const total = gs.length; gs = gs.slice(0, 150);
-      grid.replaceChildren(...gs.map(({ g, a }) => h('button', { class: 'lcard', type: 'button', style: `--c:${g.color}`, onclick: () => go('home', g.rep.id) },
-        lsym(g, 'md', null), h('span', { class: 'tx' }, h('b', null, g.name), h('small', null, `${g.members.length > 1 ? g.members.length + '系統 ・ ' : ''}${a.trainCount}本運行${a.maxDelaySec >= 60 ? ` ・最大${Math.round(a.maxDelaySec / 60)}分遅れ` : ''}`)), chip(a.status))));
-      note.textContent = total ? `${total}路線${total > gs.length ? `(上位${gs.length}件を表示。検索で絞り込めます)` : ''} ・ 同じ路線名の系統は自動でまとめています` : '該当する路線がありません';
+  function renderHome(view, force) {
+    if (!S.groups.length) { HOME.root = null; view.replaceChildren(h('div', { class: 'empty' }, S.ok ? '路線データを待っています…' : 'MODに接続すると路線が表示されます')); return; }
+    const p = parseHash(); const g = pickGroup(p.arg);
+    if (!HOME.root || HOME.rev !== S.groupsRev) buildHomeRoot();
+    if (view.firstElementChild !== HOME.root) { view.replaceChildren(HOME.root); HOME.list.scrollTop = HOME.listScroll; }
+    updateHomeList(g);
+    if (!force && busyScrolling() && HOME.mainKey === g.key) return;
+    const oldD = HOME.main.querySelector('#dscroll'); if (oldD) dscrollLeft[oldD.dataset.key] = oldD.scrollLeft;
+    const nv = mainHome(g);
+    const same = nv.outerHTML === HOME.main.firstElementChild?.outerHTML;
+    if (!same) {
+      const x = window.scrollY;
+      HOME.main.replaceChildren(nv);
+      const nd = $('#dscroll');
+      if (nd) {
+        const sk = nd.dataset.key;
+        if (dscrollLeft[sk] != null && dscrollInit.has(sk)) nd.scrollLeft = dscrollLeft[sk];
+        else { dscrollInit.add(sk); const first = nd.querySelector('.tr'); nd.scrollLeft = first ? Math.max(0, first.offsetLeft - nd.clientWidth / 2) : 0; }
+      }
+      window.scrollTo({ top: x, left: 0, behavior: 'instant' });
     }
-    fill(); refillLines = fill;
-    return h('div', null, input, pills, note, grid);
+    HOME.mainKey = g.key;
+  }
+  // ---------- 路線一覧(一度だけ作り、以後は文字と色だけ書き換える。並びは名前順で固定) ----------
+  const LINES = { root: null, rev: -1, q: '', filter: 'all', items: new Map(), note: null, pills: null };
+  function buildLines() {
+    LINES.items = new Map();
+    const input = h('input', { class: 'search', type: 'search', placeholder: '路線名で検索', value: LINES.q, 'aria-label': '路線を検索', oninput: e => { LINES.q = e.target.value; applyLines(); } });
+    LINES.pills = h('div', { class: 'pills' }, [['all', 'すべて'], ['running', '運行中'], ['trouble', '乱れあり']].map(([k, l]) =>
+      h('button', { class: 'pill', type: 'button', 'data-k': k, onclick: () => { LINES.filter = k; applyLines(); } }, l)));
+    LINES.note = h('div', { class: 'nodata' });
+    const grid = h('div', { class: 'grid' });
+    for (const g of S.groups) {
+      const meta = h('small'), badge = h('span');
+      const el = h('button', { class: 'lcard', type: 'button', style: `--c:${g.color}`, onclick: () => go('home', g.rep.id) },
+        lsym(g, 'md'), h('span', { class: 'tx' }, h('b', null, g.name), meta), badge);
+      LINES.items.set(g.key, { el, meta, badge }); grid.append(el);
+    }
+    LINES.root = h('div', null, input, LINES.pills, LINES.note, grid); LINES.rev = S.groupsRev;
+  }
+  function applyLines() {
+    for (const b of LINES.pills.children) b.setAttribute('aria-pressed', String(b.dataset.k === LINES.filter));
+    let shown = 0;
+    for (const g of S.groups) {
+      const it = LINES.items.get(g.key); if (!it) continue; const a = groupAgg(g);
+      const m = `${g.members.length > 1 ? g.members.length + '系統 ・ ' : ''}${metaOf(a)}`; if (it.meta.textContent !== m) it.meta.textContent = m;
+      setChip(it.badge, a.status);
+      const vis = matchGroup(g, LINES.q) && (LINES.filter === 'running' ? a.trainCount > 0 : LINES.filter === 'trouble' ? a.status !== 'normal' : true);
+      it.el.hidden = !vis; if (vis) shown++;
+    }
+    LINES.note.textContent = shown ? `${shown}路線 ・ 同じ路線名・同じナンバリングの系統は自動でまとめています` : '該当する路線がありません';
+  }
+  function renderLines(view) {
+    if (!LINES.root || LINES.rev !== S.groupsRev) buildLines();
+    if (view.firstElementChild !== LINES.root) view.replaceChildren(LINES.root);
+    applyLines();
   }
 
   // ---------- 車両 ----------
@@ -513,33 +564,35 @@
     const lateTxt = (t.delaySec || 0) < 30 ? 'なし' : fmtDelay(t.delaySec);
     const dc = colOf(t.status);
     const nCars = t.cars || 0;
-    const carsEl = rev => h('div', { class: 'cars', style: `--c:${color}` },
-      h('span', { class: 'nose' + (rev ? ' rev' : '') }),
-      nCars ? Array.from({ length: nCars }, (_, i) => h('span', { class: 'car', title: (t.carNumbers || [])[i] || '' }, i + 1, h('small', null, ((t.carNumbers || [])[i] || '').split('-')[0] || ''))) : h('span', { class: 'car' }, '?'));
+    const etaOf = new Map((t.etas || []).map(e => [String(e.stationId), e]));
+    const carLabel = i => { const raw = (t.carNumbers || [])[i] || ''; const m = raw.match(/(\d+)\s*$/); return m ? m[1] : raw; };
+    const carsEl = cls => h('div', { class: 'cars ' + (cls || ''), style: `--c:${color}` },
+      h('span', { class: 'nose' }),
+      nCars ? Array.from({ length: nCars }, (_, i) => h('span', { class: 'car', title: (t.carNumbers || [])[i] || '' }, h('b', null, i + 1), h('small', null, carLabel(i)))) : h('span', { class: 'car' }, h('b', null, '?')));
     const tl = h('div', { class: 'tlist', style: `--c:${color}` });
-    const row = (i, cls, tag, tagCls) => {
-      const s0 = station(ids[i]) || { name: ids[i] };
-      return h('div', { class: 'trow ' + (cls || '') }, h('div', { class: 'nd' }, codeEls(stationCode(letters, ids[i]))),
-        h('div', { class: 'nm' }, jp(s0.name), en(s0.name) ? h('small', null, en(s0.name)) : null), tag ? h('span', { class: 'tag ' + (tagCls || '') }, tag) : null);
+    const row = (i, cls, tag, tagCls, withCars) => {
+      const s0 = station(ids[i]) || { name: ids[i] }; const eta = etaOf.get(ids[i]);
+      return h('div', { class: 'trow ' + (cls || '') + (withCars ? ' hascars' : '') }, h('div', { class: 'nd' }, codeEls(stationCode(letters, ids[i]))),
+        h('div', { class: 'nm' }, jp(s0.name), en(s0.name) ? h('small', null, en(s0.name)) : null),
+        withCars ? carsEl('inrow') : null,
+        eta ? h('span', { class: 'tm' + ((t.delaySec || 0) >= 60 ? ' late' : '') }, eta.clock, h('small', null, '到着予想')) : null,
+        tag ? h('span', { class: 'tag ' + (tagCls || '') }, tag) : null);
     };
     if (tp) {
       const stopped = t.atStop && Number.isInteger(tp.pos);
       const a = Math.floor(tp.pos + 1e-6);                              // 列車の手前にある駅(停車中はその駅)
-      const firstAhead = stopped ? a + 1 : a + 1;
+      const firstAhead = a + 1;
       const passedTo = stopped ? a - 1 : a;                             // 通過済みとして薄く表示する最後の駅
-      const showFrom = Math.max(0, passedTo - 1);
-      if (showFrom > 0) tl.append(h('div', { class: 'trow fold past' }, h('div', { class: 'nd' }), h('div', { class: 'nm' }, `ここまでに ${showFrom} 駅を通過`)));
-      for (let i = showFrom; i <= passedTo; i++) tl.append(row(i, 'past'));
-      if (stopped) tl.append(row(a, '', '停車中', 'stop'));
-      const prevS = station(ids[stopped ? a : a]), nextS = station(ids[firstAhead]);
-      const state = h('div', { class: 'tstate' },
-        h('span', null, stopped ? `停車中${t.dwellRemainSec != null ? `(あと${t.dwellRemainSec}秒)` : ''}` : `走行中 ${Math.round(t.speedKmh || 0)} km/h`),
-        stopped ? null : h('span', { class: 'nodata' }, `${prevS ? jp(prevS.name) : ''} → ${nextS ? jp(nextS.name) : ''}`));
-      tl.append(h('div', { class: 'tblock' + (stopped ? ' atnode' : ''), style: `--c:${color}` }, carsEl(false), state));
-      const frac = tp.pos - Math.floor(tp.pos);
-      for (let i = firstAhead; i < ids.length; i++) {
-        tl.append(i === firstAhead ? row(i, '', !stopped && frac >= 0.7 ? 'まもなく' : '次の駅', '') : row(i));
+      for (let i = Math.max(0, passedTo - 1); i <= passedTo; i++) tl.append(row(i, 'past'));
+      if (stopped) tl.append(row(a, 'here', '停車中', 'stop', true));
+      else {
+        const prevS = station(ids[a]), nextS = station(ids[firstAhead]);
+        tl.append(h('div', { class: 'tblock', style: `--c:${color}` }, carsEl(''),
+          h('div', { class: 'tstate' }, h('span', null, `走行中 ${Math.round(t.speedKmh || 0)} km/h`), h('span', { class: 'nodata' }, `${prevS ? jp(prevS.name) : ''} → ${nextS ? jp(nextS.name) : ''}`))));
       }
+      const frac = tp.pos - Math.floor(tp.pos);
+      for (let i = firstAhead; i < ids.length; i++) tl.append(i === firstAhead ? row(i, '', !stopped && frac >= 0.7 ? 'まもなく' : '次の駅', '') : row(i));
+      if (stopped && t.dwellRemainSec != null) tl.append(h('div', { class: 'nodata', style: 'padding:2px 0 0 60px' }, `発車まであと${t.dwellRemainSec}秒`));
       if (firstAhead >= ids.length) tl.append(h('div', { class: 'nodata', style: 'padding:6px 0 0 60px' }, 'この先に停車駅はありません'));
     }
     const dl = [['編成番号', t.title || t.formation || '番号未設定'], ['車両', t.typeName || t.series], t.typeName && t.series && t.series !== t.typeName ? ['系列', t.series] : null,
@@ -552,9 +605,10 @@
         h('div', { class: 'dest' }, h('b', null, jp(t.destination) || '回送'), ' 行き'),
         t.manual ? h('div', { class: 'meta' }, '手動運転中(遅れ判定の対象外)') : null),
       h('div', { class: 'drow' }, chip(t.status), h('div', { class: `late s-${dc === 'ok' ? 'normal' : t.status}` }, `遅れ：${lateTxt}`)),
-      h('div', { class: 'msec' }, tp ? tl : h('div', { class: 'nodata' }, 'この列車の位置を路線上で特定できません(詳細レベルが低いか、路線外です)。')),
+      h('div', { class: 'msec' }, tp ? tl : h('div', { class: 'nodata' }, 'この列車の位置を路線上で特定できません(詳細レベルが低いか、路線外です)。'),
+        tp && etaOf.size ? h('div', { class: 'nodata', style: 'margin-top:8px' }, '到着予想はダイヤ上の残り時間から計算した、ゲーム内時刻です。') : null),
       h('div', { class: 'mdl' }, h('dl', { class: 'dl' }, dl.map(([k, v]) => [h('dt', null, k), h('dd', null, v)]))),
-      h('div', { class: 'msec nodata' }, '容量の都合で省略された項目は表示されません。')], color);
+      h('div', { class: 'msec nodata' }, '容量の都合で省略された項目は表示されません。')], color, true);
   }
   function stationsModal(g) {
     const chain = chainOf(g); const lt = g.letter ? [g.letter] : g.letters;
@@ -646,37 +700,21 @@
     else if (S.live && (!S.live.connected || S.live.stale)) { b.hidden = false; b.className = 'banner'; b.textContent = 'サーバーからの更新が止まっています。表示は最新ではありません。'; }
     else b.hidden = true;
     if (S.live) $('#clock').textContent = S.live.clock || '--:--';
-    const builders = { home: () => viewHome(p.arg), lines: viewLines, fleet: viewFleet, ghost: viewGhost, settings: viewSettings };
-    const key = p.view + '/' + p.arg;
-    const typing = key === renderedKey && document.activeElement && document.activeElement.classList.contains('search');
-    if (typing && p.view === 'fleet') fillFleet($('#fleet-list'));
-    else if (typing && p.view === 'lines' && refillLines) refillLines();
-    else if (!force && busyScrolling() && key === renderedKey) { /* 操作中は作り直さない */ }
+    if (p.view === 'home') renderHome(view, force);
+    else if (p.view === 'lines') renderLines(view);
     else {
-      refillLines = null;
-      const x = window.scrollY;
-      const oldD = $('#dscroll'), oldS = $('#strip');
-      if (oldD) dscrollLeft[oldD.dataset.key] = oldD.scrollLeft;
-      if (oldS) stripScroll = oldS.scrollLeft;
-      const nv = (builders[p.view] || builders.home)();
-      const same = nv.outerHTML === view.firstElementChild?.outerHTML && view.childElementCount === 1;
-      if (!same) {
-        view.replaceChildren(nv);
-        const nd = $('#dscroll'), ns = $('#strip');
-        if (nd) {
-          const sk = nd.dataset.key;
-          if (dscrollLeft[sk] != null && dscrollInit.has(sk)) nd.scrollLeft = dscrollLeft[sk];
-          else { dscrollInit.add(sk); const first = nd.querySelector('.tr'); nd.scrollLeft = first ? Math.max(0, first.offsetLeft - nd.clientWidth / 2) : 0; }
-        }
-        if (ns) {
-          const selEl = ns.querySelector('.sel');
-          if (selEl && lastSel !== S.selKey) { ns.style.scrollBehavior = 'auto'; ns.scrollLeft = selEl.offsetLeft - ns.clientWidth / 2 + selEl.offsetWidth / 2; ns.style.scrollBehavior = ''; lastSel = S.selKey; }
-          else ns.scrollLeft = stripScroll;
-        }
-        window.scrollTo({ top: x, left: 0, behavior: 'instant' });
+      const builders = { fleet: viewFleet, ghost: viewGhost, settings: viewSettings };
+      const key = p.view;
+      const typing = key === renderedKey && document.activeElement && document.activeElement.classList.contains('search');
+      if (typing && p.view === 'fleet') fillFleet($('#fleet-list'));
+      else if (!force && busyScrolling() && key === renderedKey) { /* 操作中は作り直さない */ }
+      else {
+        const x = window.scrollY;
+        const nv = (builders[p.view] || viewFleet)();
+        if (!(nv.outerHTML === view.firstElementChild?.outerHTML && view.childElementCount === 1)) { view.replaceChildren(nv); window.scrollTo({ top: x, left: 0, behavior: 'instant' }); }
       }
-      renderedKey = key;
     }
+    renderedKey = p.view;
     drawModal();
     if (p.view === 'home' && p.sid && scrolledFor !== location.hash) {
       const el = document.querySelector(`[data-sid="${CSS.escape(p.sid)}"]`), sc = $('#dscroll');
