@@ -1,0 +1,2 @@
+package mtr.data;
+public class Siding extends SavedRailBase { public final float railLength=0; public String getTrainId(){return null;} public float getAccelerationConstant(){return 0;} public int getMaxTrains(){return 0;} public boolean getIsManual(){return false;} public boolean getUnlimitedTrains(){return false;} public static class TimeSegment { public double endRailProgress; public long savedRailBaseId; public long routeId; public int currentStationIndex; public float endTime; public final double startRailProgress=0; public double getTime(double p){return 0;} } }

@@ -1,0 +1,2 @@
+package net.minecraft.client;
+public class Minecraft { public static Minecraft getInstance(){return null;} public net.minecraft.client.multiplayer.ClientLevel level; public net.minecraft.client.player.LocalPlayer player; public net.minecraft.client.gui.Font font; public void setScreen(net.minecraft.client.gui.screens.Screen s){} public net.minecraft.client.multiplayer.ClientPacketListener getConnection(){return null;} public void execute(Runnable r){} public net.minecraft.client.gui.screens.Screen screen; }

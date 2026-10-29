@@ -31,6 +31,9 @@ MOD未導入の環境では `Packages...` がJavaクラスにならないため�
 | `entryTypeName(entry)` | 車両名(同 `name`) |
 | `entrySeries(entry)` | 系列名(登録した系列。空なら車両名) |
 | `entryTrainId(entry)` | 列車ID(64bitなので文字列) |
+| `entryExpectedMillis(entry)` | 到着見込み(UNIXミリ秒、mtrops の補正済み) |
+
+どのメソッドも第2引数にホームIDを渡せます(例 `Api.entryNumber(e, platformId)`)。省略時はMTRの到着予定一覧から探します。
 
 ```js
 const Api = Packages.jp.mtrops.api.MtrOpsApi;
@@ -48,4 +51,4 @@ const name = String(Api.entryTypeName(e));     // 例: "E233系1000番台"
 
 というマッチングをしています。始発前(まだ車庫にいる)の予定や、次駅情報(詳細レベル1以上)が無い場合は該当なし(`""` / `0`)になります。車種(`entryTypeId` など)は詳細レベル3以上のときに取れます。
 同じホームの到着予定一覧は `ClientData.SCHEDULES_FOR_PLATFORM` から読みます。読めない版では「直近2秒以内に問い合わせたエントリ」から順位を数えます(到着の早い順に問い合わせるスクリプトを想定)。
-`ScheduleEntry` からは `routeId` / `platformId` / `arrivalMillis` / `trainCars`(フィールドまたは同名のメソッド)を読みます。
+MTR 3.2.2 の `ScheduleEntry` はホームIDを持たないため、`ClientData.SCHEDULES_FOR_PLATFORM` のどのホームの一覧に入っているかで判定します。列車との対応は、サーバーから届く到着予想(そのホームに早く着く順)を優先します。

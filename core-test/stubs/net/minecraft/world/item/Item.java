@@ -1,0 +1,2 @@
+package net.minecraft.world.item;
+public class Item { public Item(Properties p){} public net.minecraft.world.InteractionResultHolder<net.minecraft.world.item.ItemStack> use(net.minecraft.world.level.Level l, net.minecraft.world.entity.player.Player p, net.minecraft.world.InteractionHand h){return null;} public static class Properties { public Properties stacksTo(int n){return this;} public Properties tab(net.minecraft.world.item.CreativeModeTab t){return this;} } }

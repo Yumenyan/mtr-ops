@@ -1,0 +1,2 @@
+package mtr.data;
+public class DataCache { public final java.util.Map<Long, Station> stationIdMap=null; public final java.util.Map<Long, Platform> platformIdMap=null; public final java.util.Map<Long, Siding> sidingIdMap=null; public final java.util.Map<Long, Route> routeIdMap=null; public final java.util.Map<Long, Depot> depotIdMap=null; public final java.util.Map<Long, Station> platformIdToStation=null; public final java.util.Map<Long, Depot> sidingIdToDepot=null; }

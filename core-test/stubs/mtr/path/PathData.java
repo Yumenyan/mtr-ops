@@ -1,0 +1,2 @@
+package mtr.path;
+public class PathData { public final mtr.data.Rail rail=null; public final long savedRailBaseId=0; public final int dwellTime=0; public final int stopIndex=0; public final net.minecraft.core.BlockPos startingPos=null; public boolean isOppositeRail(PathData o){return false;} public java.util.UUID getRailProduct(){return null;} public static java.util.UUID getRailProduct(net.minecraft.core.BlockPos a, net.minecraft.core.BlockPos b){return null;} }

@@ -1,0 +1,2 @@
+package net.minecraft.client.gui.components.events;
+public interface GuiEventListener { default boolean mouseClicked(double x,double y,int b){return false;} default boolean mouseReleased(double x,double y,int b){return false;} default boolean mouseDragged(double x,double y,int b,double dx,double dy){return false;} default boolean mouseScrolled(double x,double y,double a){return false;} default boolean keyPressed(int k,int s,int m){return false;} default boolean charTyped(char c,int m){return false;} default boolean isMouseOver(double x,double y){return false;} }
