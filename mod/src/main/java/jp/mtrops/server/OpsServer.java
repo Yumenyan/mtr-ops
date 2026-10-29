@@ -322,9 +322,15 @@ public final class OpsServer {
 					tr.arriveTick = arriveTick;
 					stopTracks.put(s.id, tr);
 				}
-				if (Double.isNaN(tr.nextIdeal) && s.etaStationIds.length > 0) {
-					tr.nextStation = s.etaStationIds[0];
-					tr.nextIdeal = s.etaIdealTicks[0] + s.elapsedDwellTicks;
+				if (Double.isNaN(tr.nextIdeal)) {
+					for (int k = 0; k < s.etaStationIds.length; k++) {
+						if (k < s.etaPass.length && s.etaPass[k]) {
+							continue; // 通過するホームは次の停車駅ではない
+						}
+						tr.nextStation = s.etaStationIds[k];
+						tr.nextIdeal = s.etaIdealTicks[k] + s.elapsedDwellTicks;
+						break;
+					}
 				}
 			}
 			final long last = s.atStop && s.curStationId != 0 ? s.curStationId : tr != null ? tr.station : s.prevStationId;

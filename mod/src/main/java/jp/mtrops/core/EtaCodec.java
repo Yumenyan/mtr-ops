@@ -16,7 +16,7 @@ import java.util.Map;
  */
 public final class EtaCodec {
 
-	private static final int MAGIC = 0x4D4F4554; // "MOET"
+	private static final int MAGIC = 0x4D4F4555; // "MOEU"
 
 	private EtaCodec() {
 	}
@@ -29,6 +29,8 @@ public final class EtaCodec {
 		public int ticks;
 		/** 時刻表上の到着までの残り(tick)。時刻表が無ければ TrainSample.NO_SCHED */
 		public int schedTicks = TrainSample.NO_SCHED;
+		/** 通過(停車しない) */
+		public boolean pass;
 	}
 
 	/** 受信した全列車分(不変として扱う)。 */
@@ -98,6 +100,7 @@ public final class EtaCodec {
 					out.writeLong(s.etaRouteIds[i]);
 					out.writeInt(s.etaTicks[i]);
 					out.writeInt(s.etaSchedTicks[i]);
+					out.writeBoolean(i < s.etaPass.length && s.etaPass[i]);
 				}
 			}
 			out.flush();
@@ -132,6 +135,7 @@ public final class EtaCodec {
 				e.routeId = in.readLong();
 				e.ticks = in.readInt();
 				e.schedTicks = in.readInt();
+				e.pass = in.readBoolean();
 				list.add(e);
 			}
 			p.byTrain.put(id, list);

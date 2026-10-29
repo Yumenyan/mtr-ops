@@ -790,6 +790,7 @@ public final class ApiHandler {
 		long routeId;
 		long depotId;
 		boolean custom;
+		boolean pass;
 		TrainView train;
 	}
 
@@ -831,7 +832,8 @@ public final class ApiHandler {
 					if (x.arr < now - 30_000 || x.arr > until) {
 						continue;
 					}
-					x.dep = x.arr + (long) (platformDwell.getOrDefault(e.platformId, 0.0) * 1000);
+					x.pass = e.pass;
+					x.dep = e.pass ? x.arr : x.arr + (long) (platformDwell.getOrDefault(e.platformId, 0.0) * 1000);
 					if (e.schedTicks != TrainSample.NO_SCHED) {
 						x.sched = es.receivedMillis + e.schedTicks * 50L;
 					}
@@ -925,6 +927,9 @@ public final class ApiHandler {
 		for (final Ent x : list) {
 			w.beginObject();
 			w.field("kind", x.kind);
+			if (x.pass) {
+				w.field("pass", true);
+			}
 			w.field("arrival", hhmmss(x.arr)).field("departure", hhmmss(x.dep));
 			w.field("arrivalMillis", x.arr).field("departureMillis", x.dep);
 			w.field("inSec", Math.max(0, (x.arr - now) / 1000));
@@ -947,7 +952,7 @@ public final class ApiHandler {
 				final long last = r.stationIds.length == 0 ? 0 : r.stationIds[r.stationIds.length - 1];
 				final Topology.Station dest = stationMap.get(last);
 				w.field("destination", !r.destination.isEmpty() ? r.destination : dest == null ? "" : dest.name);
-				w.field("terminating", last == st.id);
+				w.field("terminating", !x.pass && last == st.id);
 			}
 			w.idField("depotId", x.depotId);
 			final Topology.Depot d = depotMap.get(x.depotId);
@@ -1225,6 +1230,9 @@ public final class ApiHandler {
 					w.field("routeName", r.name);
 				}
 				w.field("turnback", e.routeId != v.s.routeId);
+			}
+			if (e.pass) {
+				w.field("pass", true);
 			}
 			w.field("sec", Math.max(0, Math.round(sec)));
 			final long at = es.receivedMillis + e.ticks * 50L;

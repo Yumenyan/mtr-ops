@@ -645,6 +645,17 @@ public class CoreSelfTest {
 		for (final byte[] b : big) cs2.acceptEtaPart(EtaCodec.decode(b));
 		check(big.size() > 1 && cs2.etas().byTrain.size() == 400, "大きいときは分割して送り、揃ったら差し替える (" + big.size() + "パート)");
 
+		// 通過するホーム: 専用パケットで往復し、補正では停車駅の基準を進めない
+		final TrainSample ps = etaSample(7, new long[]{2, 3, 4}, new int[]{1000, 2000, 3000});
+		ps.etaPass = new boolean[]{false, true, false};
+		final ClientStore cs3 = new ClientStore();
+		for (final byte[] b : EtaCodec.encode(List.of(ps), 9, 0L, 900000)) cs3.acceptEtaPart(EtaCodec.decode(b));
+		check(!cs3.etasOf(7).get(0).pass && cs3.etasOf(7).get(1).pass && !cs3.etasOf(7).get(2).pass, "通過のフラグが専用パケットで往復する");
+		final SectionStats pst = new SectionStats();
+		pst.add(2, 4, 220, 200, 0);
+		EtaPlanner.calibrate(ps, 1, pst);
+		check(ps.etaTicks[0] == 1000 && ps.etaTicks[2] == 1000 + 2000 * 11 / 10 && ps.etaTicks[1] > ps.etaTicks[0] && ps.etaTicks[1] < ps.etaTicks[2], "通過時刻も前後の停車駅の間に入る: " + Arrays.toString(ps.etaTicks));
+
 		// 駅間の実績で補正(遠い駅ほど早すぎる予想にならない)
 		final SectionStats stats = new SectionStats();
 		check(stats.add(1, 2, 120, 100, 0) && !stats.add(1, 2, 1000, 100, 0), "実績を足す(比率が極端なもの=待避などは捨てる)");

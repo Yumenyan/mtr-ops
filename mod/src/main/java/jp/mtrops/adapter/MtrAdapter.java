@@ -75,6 +75,7 @@ public final class MtrAdapter {
 		}
 		final DataCache dataCache = railwayData.dataCache;
 		final String dimension = level.dimension().location().toString();
+		platformsByRail = platformIndex(railwayData);
 
 		for (final Siding siding : new ArrayList<>(railwayData.sidings)) {
 			final Depot depot = dataCache.sidingIdToDepot.get(siding.id);
@@ -90,6 +91,21 @@ public final class MtrAdapter {
 				}
 			}
 		}
+	}
+
+	/** 通過するホームを引くための表(レール → ホーム)。ホームの数が変わったときだけ作り直す。サーバースレッドからだけ使う。 */
+	private static java.util.Map<java.util.UUID, mtr.data.Platform> platformsByRail = new java.util.HashMap<>();
+	private static RailwayData platformIndexOwner;
+	private static int platformIndexSize = -1;
+	private static java.util.Map<java.util.UUID, mtr.data.Platform> platformIndexCache = new java.util.HashMap<>();
+
+	private static java.util.Map<java.util.UUID, mtr.data.Platform> platformIndex(RailwayData rd) {
+		if (rd != platformIndexOwner || rd.platforms.size() != platformIndexSize) {
+			platformIndexOwner = rd;
+			platformIndexSize = rd.platforms.size();
+			platformIndexCache = DiaAdapter.platformsByRail(rd.platforms);
+		}
+		return platformIndexCache;
 	}
 
 	private static TrainSample sampleTrain(TrainServer t, Siding siding, Depot depot, DataCache dc, String dimension, long nowTick, ElapsedTracker tracker, boolean withCars) {
@@ -280,6 +296,55 @@ public final class MtrAdapter {
 			if (pending != null && found.size() < TrainSample.MAX_ETAS) {
 				found.add(pending);
 			}
+			// 停車せず通過するホーム(発車標の到着予定には出ないが、通過列車の時刻として使う)。1周目の経路の残りだけ。
+			final List<Double> distances = MtrFields.distances(t);
+			final int head = Math.max(0, t.getIndex(s.railProgress, false));
+			final java.util.Set<Long> stopPlatforms = new HashSet<>();
+			for (final long[] e : found) {
+				stopPlatforms.add(e[0]);
+			}
+			long lastPass = 0;
+			for (int i = head; i < t.path.size() && i < distances.size() && found.size() < TrainSample.MAX_ETAS; i++) {
+				final PathData pd = t.path.get(i);
+				if (pd.dwellTime > 0 || pd.rail.railType != mtr.data.RailType.PLATFORM) {
+					lastPass = 0;
+					continue;
+				}
+				final mtr.data.Platform pf = platformsByRail.get(pd.getRailProduct());
+				if (pf == null || pf.id == lastPass) {
+					continue;
+				}
+				lastPass = pf.id;
+				if (stopPlatforms.contains(pf.id)) {
+					continue;
+				}
+				final double from = i == 0 ? 0 : distances.get(i - 1);
+				if (from < s.railProgress - 1) {
+					continue; // もう通り過ぎた
+				}
+				double ideal = Double.NaN;
+				for (final Siding.TimeSegment seg : segments) {
+					if (RailwayData.isBetween(from, seg.startRailProgress, seg.endRailProgress)) {
+						ideal = seg.getTime(from);
+						break;
+					}
+				}
+				if (Double.isNaN(ideal)) {
+					continue;
+				}
+				final double ticks = ideal - currentTime + base;
+				if (ticks > ETA_HORIZON_TICKS) {
+					break;
+				}
+				long routeId = 0;
+				final long[] holder = {0};
+				if (depot != null) {
+					RailwayData.useRoutesAndStationsFromIndex(pd.stopIndex - 1, depot.routeIds, dc, (currentStationIndex, thisRoute, nextRoute, thisStation, nextStation, lastStation) -> holder[0] = thisRoute == null ? 0 : thisRoute.id);
+					routeId = holder[0];
+				}
+				found.add(new long[]{pf.id, routeId, Math.round(Math.max(0, ticks)), 1});
+			}
+			found.sort(java.util.Comparator.comparingLong(e -> e[2]));
 			final List<long[]> ok = new ArrayList<>();
 			for (final long[] e : found) {
 				// 停車中の駅(到着済み)は除く
@@ -288,7 +353,7 @@ public final class MtrAdapter {
 				}
 				final Station st = dc.platformIdToStation.get(e[0]);
 				if (st != null) {
-					ok.add(new long[]{st.id, e[0], e[1], Math.max(0, e[2])});
+					ok.add(new long[]{st.id, e[0], e[1], Math.max(0, e[2]), e.length > 3 ? 1 : 0});
 				}
 			}
 			final int n = ok.size();
@@ -298,8 +363,10 @@ public final class MtrAdapter {
 			s.etaIdealTicks = new int[n];
 			s.etaTicks = new int[n];
 			s.etaSchedTicks = new int[n];
+			s.etaPass = new boolean[n];
 			for (int k = 0; k < n; k++) {
 				final long[] e = ok.get(k);
+				s.etaPass[k] = e[4] == 1;
 				s.etaStationIds[k] = e[0];
 				s.etaPlatformIds[k] = e[1];
 				s.etaRouteIds[k] = e[2];
