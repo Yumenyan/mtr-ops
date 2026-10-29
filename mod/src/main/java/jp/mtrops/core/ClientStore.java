@@ -23,6 +23,98 @@ public final class ClientStore {
 
 	private final Map<Integer, List<SnapshotCodec.Part>> pending = new HashMap<>();
 
+	// ---- カスタムダイヤ ----
+	private volatile DiaSync.State dia = new DiaSync.State();
+	private volatile DiaSync.Live diaLive = new DiaSync.Live();
+	private volatile String diaMessage = "";
+	private volatile int diaResult = -1;
+	private volatile int diaSeq;
+
+	// ---- 到着予想・時刻表・レール ----
+	private volatile EtaCodec.Set etas = new EtaCodec.Set();
+	private final Map<Integer, List<EtaCodec.Part>> pendingEtas = new HashMap<>();
+	private volatile ScheduleSync.State schedule = new ScheduleSync.State();
+	private volatile RailNetwork.Snapshot rails;
+
+	public DiaSync.State dia() {
+		return dia;
+	}
+
+	public void setDia(DiaSync.State s) {
+		this.dia = s;
+	}
+
+	public DiaSync.Live diaLive() {
+		return diaLive;
+	}
+
+	public void setDiaLive(DiaSync.Live l) {
+		this.diaLive = l;
+	}
+
+	/** ダイヤ保存の結果(サーバーから)。code 200=成功 */
+	public void setDiaResult(int code, String message) {
+		this.diaResult = code;
+		this.diaMessage = message == null ? "" : message;
+		this.diaSeq++;
+	}
+
+	public int diaResult() {
+		return diaResult;
+	}
+
+	public String diaMessage() {
+		return diaMessage;
+	}
+
+	public int diaSeq() {
+		return diaSeq;
+	}
+
+	public EtaCodec.Set etas() {
+		return etas;
+	}
+
+	/** 列車の到着予想(受信していなければ空)。 */
+	public List<EtaCodec.Entry> etasOf(long trainId) {
+		final List<EtaCodec.Entry> l = etas.byTrain.get(trainId);
+		return l == null ? java.util.Collections.emptyList() : l;
+	}
+
+	public synchronized void acceptEtaPart(EtaCodec.Part p) {
+		final List<EtaCodec.Part> list = pendingEtas.computeIfAbsent(p.seq, k -> new ArrayList<>());
+		list.removeIf(q -> q.part == p.part);
+		list.add(p);
+		pendingEtas.keySet().removeIf(seq -> seq < p.seq);
+		if (list.size() >= p.parts) {
+			final EtaCodec.Set set = new EtaCodec.Set();
+			set.seq = p.seq;
+			set.serverMillis = p.serverMillis;
+			set.receivedMillis = System.currentTimeMillis();
+			for (final EtaCodec.Part q : list) {
+				set.byTrain.putAll(q.byTrain);
+			}
+			pendingEtas.remove(p.seq);
+			etas = set;
+		}
+	}
+
+	public ScheduleSync.State schedule() {
+		return schedule;
+	}
+
+	public void setSchedule(ScheduleSync.State s) {
+		this.schedule = s;
+	}
+
+	public RailNetwork.Snapshot rails() {
+		return rails;
+	}
+
+	public void setRails(RailNetwork.Snapshot r) {
+		this.rails = r;
+	}
+
 	public Topology topology() {
 		return topology;
 	}
@@ -137,5 +229,11 @@ public final class ClientStore {
 		geometry = new Geometry();
 		pending.clear();
 		pendingGeometry.clear();
+		dia = new DiaSync.State();
+		diaLive = new DiaSync.Live();
+		etas = new EtaCodec.Set();
+		pendingEtas.clear();
+		schedule = new ScheduleSync.State();
+		rails = null;
 	}
 }

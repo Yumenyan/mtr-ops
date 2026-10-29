@@ -19,6 +19,8 @@ import java.util.UUID;
  *   Train.ridingEntities       protected final Set<UUID>
  *   TrainServer.timeSegments   private final List<Siding.TimeSegment>
  *   TrainServer.routeId        private long
+ *   Train.elapsedDwellTicks    protected float            (カスタムダイヤの発車時刻合わせ)
+ *   TrainServer.trainPositions private List<Map<UUID, Long>>(カスタムダイヤのATC: 前方の在線)
  *
  * フィールドが見つからない場合(別バージョンのMTR)は missing に名前を残し、
  * MtrAdapter.selfCheck() が起動時にログへ出す。推測で別の経路を使うことはしない。
@@ -33,6 +35,10 @@ final class MtrFields {
 	private static final Field TRAIN_RIDING = find(Train.class, "ridingEntities");
 	private static final Field TS_TIME_SEGMENTS = find(TrainServer.class, "timeSegments");
 	private static final Field TS_ROUTE_ID = find(TrainServer.class, "routeId");
+	private static final Field TRAIN_ELAPSED_DWELL = find(Train.class, "elapsedDwellTicks");
+	private static final Field TS_TRAIN_POSITIONS = find(TrainServer.class, "trainPositions");
+	private static final Field TRAIN_REPEAT1 = find(Train.class, "repeatIndex1");
+	private static final Field TRAIN_REPEAT2 = find(Train.class, "repeatIndex2");
 
 	private MtrFields() {
 	}
@@ -105,6 +111,41 @@ final class MtrFields {
 			return TS_ROUTE_ID == null ? 0 : TS_ROUTE_ID.getLong(train);
 		} catch (ReflectiveOperationException e) {
 			return 0;
+		}
+	}
+
+	static float elapsedDwellTicks(Train train) {
+		try {
+			return TRAIN_ELAPSED_DWELL == null ? 0 : TRAIN_ELAPSED_DWELL.getFloat(train);
+		} catch (ReflectiveOperationException e) {
+			return 0;
+		}
+	}
+
+	static void setElapsedDwellTicks(Train train, float value) {
+		try {
+			if (TRAIN_ELAPSED_DWELL != null) {
+				TRAIN_ELAPSED_DWELL.setFloat(train, value);
+			}
+		} catch (ReflectiveOperationException ignored) {
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	static List<java.util.Map<UUID, Long>> trainPositions(TrainServer train) {
+		try {
+			return TS_TRAIN_POSITIONS == null ? null : (List<java.util.Map<UUID, Long>>) TS_TRAIN_POSITIONS.get(train);
+		} catch (ReflectiveOperationException e) {
+			return null;
+		}
+	}
+
+	/** 「無限に繰り返す」車庫の列車か(Train.isRepeat と同じ: repeatIndex1 > 0 && repeatIndex2 > 0)。 */
+	static boolean isRepeat(Train train) {
+		try {
+			return TRAIN_REPEAT2 != null && TRAIN_REPEAT1 != null && TRAIN_REPEAT1.getInt(train) > 0 && TRAIN_REPEAT2.getInt(train) > 0;
+		} catch (ReflectiveOperationException e) {
+			return false;
 		}
 	}
 }

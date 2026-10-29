@@ -14,7 +14,7 @@ import java.util.List;
  */
 public final class GeometryCodec {
 
-	private static final int MAGIC = 0x4D4F4731; // "MOG1"
+	private static final int MAGIC = 0x4D4F4732; // "MOG2"
 
 	private GeometryCodec() {
 	}
@@ -31,7 +31,7 @@ public final class GeometryCodec {
 		List<Geometry.Section> cur = new ArrayList<>();
 		int size = 0;
 		for (final Geometry.Section s : g.sections) {
-			final int est = 40 + s.pointCount() * 9;
+			final int est = 48 + s.pointCount() * 9 + s.partTypes.length * 24;
 			if (!cur.isEmpty() && size + est > maxBytes - 64) {
 				groups.add(cur);
 				cur = new ArrayList<>();
@@ -61,6 +61,14 @@ public final class GeometryCodec {
 				out.writeLong(s.fromStationId);
 				out.writeLong(s.toStationId);
 				out.writeFloat((float) s.distance);
+				out.writeUTF(s.mode == null ? "" : s.mode);
+				final int pc = Math.min(s.partTypes.length, Math.min(s.partFrom.length, s.partTo.length));
+				out.writeShort(pc);
+				for (int i = 0; i < pc; i++) {
+					out.writeUTF(s.partTypes[i]);
+					out.writeFloat(s.partFrom[i]);
+					out.writeFloat(s.partTo[i]);
+				}
 				final int n = s.pointCount();
 				out.writeShort(n);
 				int px = 0, py = 0, pz = 0;
@@ -95,6 +103,16 @@ public final class GeometryCodec {
 			s.fromStationId = in.readLong();
 			s.toStationId = in.readLong();
 			s.distance = in.readFloat();
+			s.mode = in.readUTF();
+			final int parts = in.readUnsignedShort();
+			s.partTypes = new String[parts];
+			s.partFrom = new float[parts];
+			s.partTo = new float[parts];
+			for (int k = 0; k < parts; k++) {
+				s.partTypes[k] = in.readUTF();
+				s.partFrom[k] = in.readFloat();
+				s.partTo[k] = in.readFloat();
+			}
 			final int n = in.readUnsignedShort();
 			s.points = new int[n * 3];
 			int px = 0, py = 0, pz = 0;

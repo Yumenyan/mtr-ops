@@ -53,10 +53,26 @@ public final class TrainSample {
 	public static final int SUSPECT_FROZEN = 1;
 	public static final int SUSPECT_NOPATH = 2;
 
-	/** これから着く停車駅と、そこへの到着までの残り(tick)。ダイヤ上の時間なので、遅れていても timetable 通りの走行を前提にした見込み。 */
+	/**
+	 * これから着く停車駅(経路の終わりまで。折り返し後の路線も含む)と、到着までの残り(tick)。
+	 * etaTicks = 見込み(MTRの理論値を区間ごとの実績で補正。カスタムダイヤは時刻表の発車時刻まで待つことも考える)、
+	 * etaSchedTicks = 時刻表上の到着(カスタムダイヤのみ。それ以外は NO_SCHED)。
+	 */
 	public long[] etaStationIds = new long[0];
+	public long[] etaPlatformIds = new long[0];
+	public long[] etaRouteIds = new long[0];
 	public int[] etaTicks = new int[0];
-	public static final int MAX_ETAS = 24;
+	public int[] etaSchedTicks = new int[0];
+	/** 補正前のMTRの理論値(tick、サーバー内だけで使う。通信には載せない) */
+	public int[] etaIdealTicks = new int[0];
+	public static final int MAX_ETAS = 64;
+	public static final int NO_SCHED = Integer.MIN_VALUE;
+	/** 停車してからの経過(tick、サーバー内だけ) */
+	public float elapsedDwellTicks;
+	/** 停車駅のホームID(停車中のみ。サーバー内だけ) */
+	public long curPlatformId;
+	/** 次に止まる経路上の位置(MTRの nextStoppingIndex。サーバー内だけ) */
+	public int nextStopIndex = -1;
 
 	public String formationId;
 	public String series;

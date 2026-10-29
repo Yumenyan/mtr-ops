@@ -150,12 +150,6 @@ public final class SnapshotCodec {
 		if (level >= 1) {
 			out.writeLong(s.nextStationId);
 			out.writeLong(s.destStationId);
-			final int n = Math.min(TrainSample.MAX_ETAS, Math.min(s.etaStationIds.length, s.etaTicks.length));
-			out.writeByte(n);
-			for (int i = 0; i < n; i++) {
-				out.writeLong(s.etaStationIds[i]);
-				out.writeInt(s.etaTicks[i]);
-			}
 		}
 		if (level >= 2) {
 			out.writeFloat((float) s.y);
@@ -257,13 +251,6 @@ public final class SnapshotCodec {
 		if (level >= 1) {
 			s.nextStationId = in.readLong();
 			s.destStationId = in.readLong();
-			final int n = in.readUnsignedByte();
-			s.etaStationIds = new long[n];
-			s.etaTicks = new int[n];
-			for (int i = 0; i < n; i++) {
-				s.etaStationIds[i] = in.readLong();
-				s.etaTicks[i] = in.readInt();
-			}
 		}
 		if (level >= 2) {
 			s.y = in.readFloat();

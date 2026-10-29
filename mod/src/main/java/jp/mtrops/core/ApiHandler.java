@@ -30,6 +30,11 @@ import java.util.function.Function;
  * GET /api/sections      駅間距離のみ(?points=1 で線形も)
  * GET /api/routes/{id}   路線の駅順・駅間距離・累積距離・線形(?points=0 で線形なし)
  * GET /api/distance      ?from=駅ID&to=駅ID[&route=路線ID] 2駅間の線路沿い距離
+ * GET /api/runtimes      駅間ごとの所要時間(MTRの理論値・走行・停車・実績)
+ * GET /api/schedule/{駅} 駅の時刻表(出庫予定と所要時間の推定から。?hours=2)。駅はID・英名・和名で指定(例 nagaumi)
+ * GET /api/rails         レールの形と種別(鉄道/船/ケーブルカー/飛行機、本線/ホーム/車庫線/折返し 等)。/api/geometry/rails も同じ
+ * GET /api/dia           カスタムダイヤの設定・時刻表・運行中の列車の便と遅れ(読み取りのみ。編集はゲーム内のダイヤ式鉄道ダッシュボード)
+ * 列車の etas(到着予想)は折り返し後の路線も含む。既定は20分先まで(?etaHorizon=秒 で変更、最大7200)
  *
  * IDはJavaScriptで精度が落ちるため、すべて文字列で返す。
  * 詳細レベルが低くて載っていない項目は、キーごと省略する。
@@ -124,6 +129,7 @@ public final class ApiHandler {
 
 	public Response handle(String path, Map<String, String> q) {
 		refreshMaps();
+		ETA_HORIZON.set(parseInt(q.get("etaHorizon"), 1200));
 		final String p = path.endsWith("/") && path.length() > 1 ? path.substring(0, path.length() - 1) : path;
 		try {
 			switch (p) {
@@ -153,6 +159,20 @@ public final class ApiHandler {
 					return ok(geometry(q, true));
 				case "/api/sections":
 					return ok(geometry(q, "1".equals(q.get("points"))));
+				case "/api/runtimes":
+					return ok(runtimes(q));
+				case "/api/rails":
+				case "/api/geometry/rails":
+					return ok(RailNetwork.toJson(store.rails(), q));
+				case "/api/dia":
+					return ok(dia(q));
+				case "/api/schedule":
+					if (q.get("station") == null) {
+						return new Response(400, error("station を指定してください(例 /api/schedule/nagaumi または ?station=駅ID)"));
+					} else {
+						final String body = schedule(q.get("station"), q);
+						return body == null ? new Response(404, error("station not found")) : ok(body);
+					}
 				case "/api/distance": {
 					final String body = distance(q);
 					return body == null ? new Response(404, error("station not found")) : ok(body);
@@ -163,6 +183,10 @@ public final class ApiHandler {
 			if (p.startsWith("/api/trains/")) {
 				final String body = trainDetail(p.substring("/api/trains/".length()));
 				return body == null ? new Response(404, error("train not found")) : ok(body);
+			}
+			if (p.startsWith("/api/schedule/")) {
+				final String body = schedule(p.substring("/api/schedule/".length()), q);
+				return body == null ? new Response(404, error("station not found")) : ok(body);
 			}
 			if (p.startsWith("/api/routes/")) {
 				final String body = routeDetail(p.substring("/api/routes/".length()), !"0".equals(q.get("points")));
@@ -205,6 +229,8 @@ public final class ApiHandler {
 		w.field("snapshotAgeMs", s == null ? -1 : age);
 		w.field("topologyRev", store.topology().rev);
 		w.field("geometryRev", store.geometry().rev);
+		w.field("customDia", !store.dia().customDepots.isEmpty());
+		w.field("scheduleReceived", store.schedule().received);
 		w.field("geometrySections", store.geometry().sections.size());
 		if (s != null) {
 			w.field("seq", s.seq);
@@ -271,6 +297,7 @@ public final class ApiHandler {
 		boolean measured;
 		boolean reversed;
 		int[] points;
+		Geometry.Section sec;
 	}
 
 	private Seg segment(long from, long to) {
@@ -287,6 +314,7 @@ public final class ApiHandler {
 			seg.measured = true;
 			seg.distance = sec.distance;
 			seg.points = sec.points;
+			seg.sec = sec;
 			return seg;
 		}
 		final Topology.Station a = stationMap.get(from);
@@ -320,6 +348,10 @@ public final class ApiHandler {
 		}
 		w.field("distanceM", seg.distance, 1);
 		w.field("measured", seg.measured);
+		if (seg.sec != null) {
+			writeParts(w, seg.sec, seg.reversed);
+		}
+		writeRuntime(w, seg.from, seg.to);
 		if (withPoints) {
 			w.name("points");
 			writePoints(w, seg.points, seg.reversed);
@@ -344,6 +376,7 @@ public final class ApiHandler {
 			seg.distance = sec.distance;
 			seg.measured = true;
 			seg.points = sec.points;
+			seg.sec = sec;
 			writeSeg(w, seg, withPoints);
 		}
 		w.endArray().endObject();
@@ -375,10 +408,15 @@ public final class ApiHandler {
 		for (int i = 1; i < r.stationIds.length; i++) {
 			segs.add(segment(r.stationIds[i - 1], r.stationIds[i]));
 		}
+		double cumSec = 0;
+		boolean timeKnown = true;
 		w.name("stations").beginArray();
 		for (int i = 0; i < r.stationIds.length; i++) {
 			if (i > 0) {
 				cum += segs.get(i - 1).distance;
+				final double t = travelSec(r.stationIds[i - 1], r.stationIds[i]);
+				timeKnown &= t >= 0;
+				cumSec += Math.max(0, t);
 			}
 			final Topology.Station st = stationMap.get(r.stationIds[i]);
 			w.beginObject();
@@ -388,6 +426,9 @@ public final class ApiHandler {
 				w.field("x", st.x).field("z", st.z);
 			}
 			w.field("cumulativeM", cum, 1);
+			if (timeKnown) {
+				w.field("cumulativeSec", cumSec, 1);
+			}
 			w.endObject();
 		}
 		w.endArray();
@@ -544,6 +585,537 @@ public final class ApiHandler {
 		adj.computeIfAbsent(b, k -> new ArrayList<>()).add(new long[]{a});
 	}
 
+
+	// ------------------------------------------------------------------ レールの種別(区間の内訳)
+
+	private static void writeParts(JsonWriter w, Geometry.Section sec, boolean reversed) {
+		if (!sec.mode.isEmpty()) {
+			w.field("mode", sec.mode);
+		}
+		final int n = Math.min(sec.partTypes.length, Math.min(sec.partFrom.length, sec.partTo.length));
+		if (n == 0) {
+			return;
+		}
+		w.name("parts").beginArray();
+		for (int k = 0; k < n; k++) {
+			final int i = reversed ? n - 1 - k : k;
+			final double a = reversed ? sec.distance - sec.partTo[i] : sec.partFrom[i];
+			final double b = reversed ? sec.distance - sec.partFrom[i] : sec.partTo[i];
+			w.beginObject().field("type", sec.partTypes[i]).field("role", RailNetwork.role(sec.partTypes[i]));
+			w.field("fromM", a, 1).field("toM", b, 1).field("lengthM", b - a, 1).endObject();
+		}
+		w.endArray();
+	}
+
+	// ------------------------------------------------------------------ 駅間の所要時間
+
+	private ScheduleSync.State cachedSchedule;
+	private DiaSync.State cachedDia;
+	private Map<String, double[]> idealRuns = new HashMap<>();
+	private Map<Long, String> platformNames = new HashMap<>();
+	private Map<Long, Double> platformDwell = new HashMap<>();
+
+	/** 全車庫の理想走行(時刻表API用の同期 + カスタムダイヤの同期)から、駅間の走行・停車時間とホーム名を引く表を作る。 */
+	private synchronized Map<String, double[]> idealRuns() {
+		final ScheduleSync.State ss = store.schedule();
+		final DiaSync.State ds = store.dia();
+		if (ss != cachedSchedule || ds != cachedDia) {
+			cachedSchedule = ss;
+			cachedDia = ds;
+			final Map<Long, DiaModel.Profile> all = new java.util.LinkedHashMap<>(ss.profiles);
+			ds.profiles.forEach(all::putIfAbsent);
+			idealRuns = ScheduleSync.idealRunTimes(all);
+			final Map<Long, String> names = new HashMap<>();
+			final Map<Long, Double> dwell = new HashMap<>();
+			for (final DiaModel.Profile p : all.values()) {
+				for (final DiaModel.Stop st : p.stops) {
+					names.putIfAbsent(st.platformId, st.platform);
+					if (!st.pass) {
+						dwell.putIfAbsent(st.platformId, Math.max(0, st.dep - st.arr));
+					}
+				}
+			}
+			platformNames = names;
+			platformDwell = dwell;
+		}
+		return idealRuns;
+	}
+
+	/** 駅間1区間の所要時間。travelSec = 実績(あれば)、無ければ理論上の走行+停車。 */
+	private void writeRuntime(JsonWriter w, long from, long to) {
+		final double[] ir = idealRuns().get(SectionStats.key(from, to));
+		final SectionStats.Stat st = store.schedule().stats.get(from, to);
+		if (ir == null && st == null) {
+			return;
+		}
+		w.name("runtime").beginObject();
+		if (ir != null) {
+			w.field("runSec", ir[0], 1);
+			w.field("dwellSec", ir[1], 1);
+		}
+		if (st != null) {
+			w.field("mtrSec", st.idealSec, 1);
+			w.field("observedSec", st.actualSec, 1);
+			w.field("samples", st.samples);
+			w.field("ratio", st.ratio(), 3);
+		}
+		final double travel = travelSec(from, to);
+		if (travel >= 0) {
+			w.field("travelSec", travel, 1);
+		}
+		w.endObject();
+	}
+
+	/** 前の駅に着いてから次の駅に着くまでの見込み(秒)。分からなければ -1。 */
+	private double travelSec(long from, long to) {
+		final SectionStats.Stat st = store.schedule().stats.get(from, to);
+		if (st != null && st.samples > 0) {
+			return st.actualSec;
+		}
+		final double[] ir = idealRuns().get(SectionStats.key(from, to));
+		return ir == null ? -1 : ir[0] + ir[1];
+	}
+
+	private String runtimes(Map<String, String> q) {
+		final Map<String, double[]> ir = idealRuns();
+		final Map<String, long[]> keys = new java.util.LinkedHashMap<>();
+		for (final String k : ir.keySet()) {
+			final String[] p = k.split(">");
+			keys.put(k, new long[]{Long.parseLong(p[0]), Long.parseLong(p[1])});
+		}
+		for (final SectionStats.Stat st : store.schedule().stats.all()) {
+			keys.putIfAbsent(SectionStats.key(st.fromStationId, st.toStationId), new long[]{st.fromStationId, st.toStationId});
+		}
+		final String from = q.get("from");
+		final String to = q.get("to");
+		final JsonWriter w = new JsonWriter();
+		w.beginObject().field("ok", true);
+		w.field("note", "runSec=駅間の走行(MTRの理論値) / dwellSec=前の駅の停車 / mtrSec=MTRの理論値(到着→到着) / observedSec=実測の平均(到着→到着) / travelSec=見込み");
+		w.name("sections").beginArray();
+		for (final long[] k : keys.values()) {
+			if ((from != null && !from.equals(Long.toString(k[0]))) || (to != null && !to.equals(Long.toString(k[1])))) {
+				continue;
+			}
+			w.beginObject().idField("fromStationId", k[0]).idField("toStationId", k[1]);
+			final Topology.Station a = stationMap.get(k[0]);
+			final Topology.Station b = stationMap.get(k[1]);
+			if (a != null) {
+				w.field("from", a.name);
+			}
+			if (b != null) {
+				w.field("to", b.name);
+			}
+			final double[] r = ir.get(SectionStats.key(k[0], k[1]));
+			if (r != null) {
+				w.field("runSec", r[0], 1).field("dwellSec", r[1], 1);
+			}
+			final SectionStats.Stat st = store.schedule().stats.get(k[0], k[1]);
+			if (st != null) {
+				w.field("mtrSec", st.idealSec, 1).field("observedSec", st.actualSec, 1).field("samples", st.samples).field("ratio", st.ratio(), 3);
+			}
+			w.field("travelSec", travelSec(k[0], k[1]), 1);
+			w.endObject();
+		}
+		w.endArray().endObject();
+		return w.toString();
+	}
+
+	// ------------------------------------------------------------------ 駅の時刻表
+
+	/** 駅の指定(ID / 英名 / 和名 / 駅名の一部)→ 駅。英数字と文字以外と大文字小文字を無視して比べる。 */
+	private Topology.Station resolveStation(String key) {
+		if (key == null || key.isEmpty()) {
+			return null;
+		}
+		try {
+			final Topology.Station byId = stationMap.get(Long.parseLong(key));
+			if (byId != null) {
+				return byId;
+			}
+		} catch (NumberFormatException ignored) {
+		}
+		final String k = slug(key);
+		if (k.isEmpty()) {
+			return null;
+		}
+		Topology.Station prefix = null;
+		for (final Topology.Station st : store.topology().stations) {
+			final String[] parts = st.name.split("\\|");
+			for (final String part : parts) {
+				if (slug(stripCode(part)).equals(k)) {
+					return st;
+				}
+			}
+			if (slug(st.name).equals(k)) {
+				return st;
+			}
+			if (prefix == null) {
+				for (final String part : parts) {
+					if (slug(stripCode(part)).startsWith(k)) {
+						prefix = st;
+					}
+				}
+			}
+		}
+		return prefix;
+	}
+
+	private static String stripCode(String name) {
+		return name.replaceAll("[\\[［][^\\]］]*[\\]］]", "");
+	}
+
+	/** URLに使える駅の呼び名(英名があれば英名、無ければ和名を、文字と数字だけ・小文字にしたもの)。 */
+	static String slug(String s) {
+		final StringBuilder b = new StringBuilder();
+		s.codePoints().forEach(c -> {
+			if (Character.isLetterOrDigit(c)) {
+				b.appendCodePoint(Character.toLowerCase(c));
+			}
+		});
+		return b.toString();
+	}
+
+	static String stationSlug(String name) {
+		final String[] parts = name.split("\\|");
+		final String en = parts.length > 1 ? slug(stripCode(parts[1])) : "";
+		return en.isEmpty() ? slug(stripCode(parts[0])) : en;
+	}
+
+	private static final class Ent {
+		String kind;
+		long arr;
+		long dep;
+		long sched = Long.MIN_VALUE;
+		long platformId;
+		long routeId;
+		long depotId;
+		boolean custom;
+		TrainView train;
+	}
+
+	private String schedule(String key, Map<String, String> q) {
+		final Topology.Station st = resolveStation(key);
+		if (st == null) {
+			return null;
+		}
+		idealRuns();
+		double hours;
+		try {
+			hours = q.containsKey("hours") ? Double.parseDouble(q.get("hours")) : 2;
+		} catch (NumberFormatException e) {
+			hours = 2;
+		}
+		hours = Math.max(0.25, Math.min(6, hours));
+		final long now = System.currentTimeMillis();
+		final long until = now + (long) (hours * 3600_000L);
+		final List<Ent> list = new ArrayList<>();
+		final ScheduleSync.State ss = store.schedule();
+		final DiaSync.State ds = store.dia();
+		final java.util.Set<Long> customDepots = new java.util.HashSet<>(ds.customDepots);
+
+		// 1. 走っている列車(到着予想。折り返し後の路線も含む)
+		final Snapshot snap = store.live();
+		final EtaCodec.Set es = store.etas();
+		if (snap != null) {
+			for (final TrainView v : snap.trains) {
+				if (!v.s.onRoute) {
+					continue;
+				}
+				for (final EtaCodec.Entry e : store.etasOf(v.s.id)) {
+					if (e.stationId != st.id) {
+						continue;
+					}
+					final Ent x = new Ent();
+					x.kind = "live";
+					x.arr = es.receivedMillis + e.ticks * 50L;
+					if (x.arr < now - 30_000 || x.arr > until) {
+						continue;
+					}
+					x.dep = x.arr + (long) (platformDwell.getOrDefault(e.platformId, 0.0) * 1000);
+					if (e.schedTicks != TrainSample.NO_SCHED) {
+						x.sched = es.receivedMillis + e.schedTicks * 50L;
+					}
+					x.platformId = e.platformId;
+					x.routeId = e.routeId != 0 ? e.routeId : v.s.routeId;
+					x.depotId = v.s.depotId;
+					x.custom = customDepots.contains(v.s.depotId);
+					x.train = v;
+					list.add(x);
+				}
+			}
+		}
+
+		// 2. これから出庫する列車(MTRの車庫の出庫時刻 + 理想走行を実績で補正した所要時間)
+		for (final Map.Entry<Long, long[]> e : ss.deploys.entrySet()) {
+			if (customDepots.contains(e.getKey())) {
+				continue;
+			}
+			final DiaModel.Profile prof = ss.profiles.get(e.getKey());
+			if (prof == null) {
+				continue;
+			}
+			final double[] off = calibratedOffsets(prof, ss.stats);
+			for (int k = 0; k < prof.stops.size(); k++) {
+				final DiaModel.Stop stop = prof.stops.get(k);
+				if (stop.pass || stop.stationId != st.id) {
+					continue;
+				}
+				for (final long t0 : e.getValue()) {
+					final Ent x = new Ent();
+					x.kind = "planned";
+					x.arr = ss.toClientMillis(t0) + (long) (off[k] * 1000);
+					if (x.arr < now || x.arr > until) {
+						continue;
+					}
+					x.dep = x.arr + (long) (Math.max(0, stop.dep - stop.arr) * 1000);
+					x.platformId = stop.platformId;
+					x.routeId = stop.routeId;
+					x.depotId = prof.depotId;
+					list.add(x);
+				}
+			}
+		}
+
+		// 3. カスタムダイヤの車庫は時刻表どおり(まだ出庫していない便)
+		if (ds.received) {
+			final java.util.Set<String> running = new java.util.HashSet<>();
+			for (final DiaRuntime.View v : store.diaLive().trains) {
+				running.add(v.depotId + "#" + v.no);
+			}
+			for (final Long depot : ds.customDepots) {
+				final List<DiaModel.Run> runs = ds.plan.runs.get(depot);
+				final DiaModel.Profile prof = ds.profiles.get(depot);
+				if (runs == null || prof == null) {
+					continue;
+				}
+				for (final DiaModel.Run r : runs) {
+					if (running.contains(r.key()) || diaMillis(r.depotDep, now, ds.utcOffset) < now) {
+						continue;
+					}
+					for (int k = 0; k < prof.stops.size() && k < r.arr.length; k++) {
+						final DiaModel.Stop stop = prof.stops.get(k);
+						if (stop.pass || stop.stationId != st.id) {
+							continue;
+						}
+						final Ent x = new Ent();
+						x.kind = "planned";
+						x.arr = diaMillis(r.arr[k], now, ds.utcOffset);
+						if (x.arr < now || x.arr > until) {
+							continue;
+						}
+						x.dep = diaMillis(r.dep[k], now, ds.utcOffset);
+						x.sched = x.arr;
+						x.platformId = stop.platformId;
+						x.routeId = stop.routeId;
+						x.depotId = depot;
+						x.custom = true;
+						list.add(x);
+					}
+				}
+			}
+		}
+		list.sort(java.util.Comparator.comparingLong(x -> x.arr));
+
+		final JsonWriter w = new JsonWriter();
+		w.beginObject().field("ok", true);
+		w.idField("stationId", st.id).field("station", st.name).field("slug", stationSlug(st.name));
+		w.field("now", now).field("hours", hours, 2);
+		w.field("note", "kind=live は走行中の列車の到着予想(折り返し後も含む)、planned は車庫の出庫予定と所要時間からの推定(カスタムダイヤは時刻表)。時刻はこの端末の時計");
+		w.name("departures").beginArray();
+		for (final Ent x : list) {
+			w.beginObject();
+			w.field("kind", x.kind);
+			w.field("arrival", hhmmss(x.arr)).field("departure", hhmmss(x.dep));
+			w.field("arrivalMillis", x.arr).field("departureMillis", x.dep);
+			w.field("inSec", Math.max(0, (x.arr - now) / 1000));
+			if (x.sched != Long.MIN_VALUE) {
+				w.field("scheduled", hhmmss(x.sched)).field("scheduledMillis", x.sched);
+				w.field("delaySec", Math.max(0, (x.arr - x.sched) / 1000));
+			}
+			w.idField("platformId", x.platformId);
+			final String pn = platformNames.get(x.platformId);
+			if (pn != null && !pn.isEmpty()) {
+				w.field("platform", pn);
+			}
+			final Topology.Route r = routeMap.get(x.routeId);
+			w.idField("routeId", x.routeId);
+			if (r != null) {
+				w.field("routeName", r.name).field("routeColor", hex(r.color));
+				if (!r.number.isEmpty()) {
+					w.field("routeNumber", r.number);
+				}
+				final long last = r.stationIds.length == 0 ? 0 : r.stationIds[r.stationIds.length - 1];
+				final Topology.Station dest = stationMap.get(last);
+				w.field("destination", !r.destination.isEmpty() ? r.destination : dest == null ? "" : dest.name);
+				w.field("terminating", last == st.id);
+			}
+			w.idField("depotId", x.depotId);
+			final Topology.Depot d = depotMap.get(x.depotId);
+			if (d != null) {
+				w.field("depotName", d.name);
+			}
+			w.field("custom", x.custom);
+			if (x.train != null) {
+				final TrainSample s = x.train.s;
+				w.idField("trainId", s.id);
+				if (s.formationId != null) {
+					w.field("formation", s.formationId).field("title", titleOf(s.sidingId, s.formationId, s.cars));
+				}
+				if (x.sched == Long.MIN_VALUE) {
+					w.field("delaySec", x.train.delaySec);
+				}
+				if (s.cars > 0) {
+					w.field("cars", s.cars);
+				}
+			}
+			w.endObject();
+		}
+		w.endArray().endObject();
+		return w.toString();
+	}
+
+	/** 車庫を出てから各停車駅に着くまでの秒(理想走行を、駅間ごとの実績比率で伸ばす)。通過駅は前の駅と同じ値。 */
+	private static double[] calibratedOffsets(DiaModel.Profile prof, SectionStats stats) {
+		final double[] off = new double[prof.stops.size()];
+		double prevArr = 0;
+		double prevOff = 0;
+		long prevSt = 0;
+		for (int k = 0; k < off.length; k++) {
+			final DiaModel.Stop s = prof.stops.get(k);
+			if (s.pass) {
+				off[k] = prevOff + (s.arr - prevArr);
+				continue;
+			}
+			final double d = Math.max(0, s.arr - prevArr);
+			off[k] = prevOff + d * (prevSt == 0 ? 1 : stats.ratio(prevSt, s.stationId));
+			prevArr = s.arr;
+			prevOff = off[k];
+			prevSt = s.stationId;
+		}
+		return off;
+	}
+
+	/** カスタムダイヤの「その日の秒」(サーバーのタイムゾーン)→ UNIXミリ秒(今に一番近い日付)。 */
+	static long diaMillis(int daySec, long nowMillis, int utcOffset) {
+		final long localNow = nowMillis / 1000 + utcOffset;
+		final long dayStart = Math.floorDiv(localNow, DiaModel.DAY) * DiaModel.DAY;
+		long t = dayStart + daySec;
+		if (t - localNow > DiaModel.DAY / 2) {
+			t -= DiaModel.DAY;
+		} else if (localNow - t > DiaModel.DAY / 2) {
+			t += DiaModel.DAY;
+		}
+		return (t - utcOffset) * 1000;
+	}
+
+	private static String hhmmss(long millis) {
+		return java.time.LocalTime.ofInstant(java.time.Instant.ofEpochMilli(millis), java.time.ZoneId.systemDefault()).withNano(0).toString();
+	}
+
+	private static int parseInt(String s, int def) {
+		try {
+			return s == null ? def : Integer.parseInt(s.trim());
+		} catch (NumberFormatException e) {
+			return def;
+		}
+	}
+
+	// ------------------------------------------------------------------ カスタムダイヤ(読み取りのみ)
+
+	private String dia(Map<String, String> q) {
+		final DiaSync.State st = store.dia();
+		final DiaSync.Live live = store.diaLive();
+		final Topology t = store.topology();
+		final long only = q.containsKey("depot") ? JsonReader.lng(q.get("depot"), -1) : -1;
+		final boolean allRuns = "all".equals(q.get("runs"));
+		final JsonWriter w = new JsonWriter().beginObject();
+		w.field("ok", true);
+		w.field("received", st.received);
+		w.field("zone", st.zone);
+		w.field("utcOffset", st.utcOffset);
+		double now = Double.NaN;
+		if (live.receivedMillis > 0) {
+			now = (live.serverNow + (System.currentTimeMillis() - live.receivedMillis) / 1000.0) % DiaModel.DAY;
+		} else if (st.received) {
+			now = Math.floorMod(System.currentTimeMillis() / 1000L + st.utcOffset, (long) DiaModel.DAY);
+		}
+		if (!Double.isNaN(now)) {
+			w.field("serverNow", now, 1);
+		}
+		w.name("settings");
+		DiaJson.writeConfig(w, st.config);
+		w.name("customDepots").beginArray();
+		for (final Long d : st.customDepots) {
+			w.value(Long.toString(d));
+		}
+		w.endArray();
+		w.name("customRoutes").beginArray();
+		for (final DiaModel.RouteSetting r : st.config.routes.values()) {
+			if (r.custom) {
+				w.value(Long.toString(r.routeId));
+			}
+		}
+		w.endArray();
+		w.name("depots").beginArray();
+		for (final Topology.Depot d : t.depots) {
+			if (!st.customDepots.contains(d.id) && only != d.id) {
+				continue;
+			}
+			w.beginObject();
+			w.idField("id", d.id);
+			w.field("name", d.name);
+			final DiaModel.Profile prof = st.profiles.get(d.id);
+			if (prof != null) {
+				w.name("stops").beginArray();
+				for (int i = 0; i < prof.stops.size(); i++) {
+					final DiaModel.Stop s = prof.stops.get(i);
+					w.beginObject().field("i", i).idField("stationId", s.stationId).idField("platformId", s.platformId).idField("routeId", s.routeId)
+							.field("station", s.station).field("platform", s.platform).field("pass", s.pass).field("arr", s.arr, 1).field("dep", s.dep, 1).endObject();
+				}
+				w.endArray();
+				w.field("total", prof.total, 1);
+			}
+			final List<DiaModel.Run> runs = st.plan.runs.get(d.id);
+			if (runs != null) {
+				w.field("runCount", runs.size());
+				final Integer off = st.plan.offsets.get(d.id);
+				w.field("appliedOffset", off == null ? 0 : off);
+				if (allRuns || only == d.id) {
+					w.name("runs").beginArray();
+					for (final DiaModel.Run r : runs) {
+						w.beginObject().field("no", r.no).field("depotDep", DiaModel.hms(r.depotDep));
+						w.name("arr").beginArray();
+						for (final int x : r.arr) {
+							w.value(DiaModel.hms(x));
+						}
+						w.endArray().name("dep").beginArray();
+						for (final int x : r.dep) {
+							w.value(DiaModel.hms(x));
+						}
+						w.endArray().name("hold").beginArray();
+						for (final int x : r.hold) {
+							w.value(x);
+						}
+						w.endArray().endObject();
+					}
+					w.endArray();
+				}
+			}
+			w.endObject();
+		}
+		w.endArray();
+		w.name("warnings").beginArray();
+		st.plan.warnings.forEach(w::value);
+		w.endArray();
+		w.name("live").beginArray();
+		for (final DiaRuntime.View v : live.trains) {
+			w.beginObject().idField("trainId", v.trainId).idField("depotId", v.depotId).field("no", v.no).field("lastStop", v.lastStop).field("delay", v.delay).endObject();
+		}
+		w.endArray();
+		w.endObject();
+		return w.toString();
+	}
+
 	// ------------------------------------------------------------------ trains
 
 	private String trains(Map<String, String> q) {
@@ -617,6 +1189,55 @@ public final class ApiHandler {
 		return null;
 	}
 
+	private static final ThreadLocal<Integer> ETA_HORIZON = ThreadLocal.withInitial(() -> 1200);
+
+	/** 到着予想(折り返し後の路線も含む)。既定は20分先まで(etaHorizon)。カスタムダイヤは時刻表の到着(scheduled)も出す。 */
+	private void writeEtas(JsonWriter w, TrainView v) {
+		final List<EtaCodec.Entry> list = store.etasOf(v.s.id);
+		if (list.isEmpty()) {
+			return;
+		}
+		idealRuns();
+		final EtaCodec.Set es = store.etas();
+		final long now = System.currentTimeMillis();
+		final int horizon = Math.max(60, Math.min(7200, ETA_HORIZON.get()));
+		final double age = (now - es.receivedMillis) / 1000.0;
+		w.name("etas").beginArray();
+		for (final EtaCodec.Entry e : list) {
+			final double sec = e.ticks / 20.0 - age;
+			if (sec > horizon) {
+				break;
+			}
+			final Topology.Station st = stationMap.get(e.stationId);
+			w.beginObject().idField("stationId", e.stationId);
+			if (st != null) {
+				w.field("station", st.name);
+			}
+			w.idField("platformId", e.platformId);
+			final String pn = platformNames.get(e.platformId);
+			if (pn != null && !pn.isEmpty()) {
+				w.field("platform", pn);
+			}
+			if (e.routeId != 0) {
+				w.idField("routeId", e.routeId);
+				final Topology.Route r = routeMap.get(e.routeId);
+				if (r != null) {
+					w.field("routeName", r.name);
+				}
+				w.field("turnback", e.routeId != v.s.routeId);
+			}
+			w.field("sec", Math.max(0, Math.round(sec)));
+			final long at = es.receivedMillis + e.ticks * 50L;
+			w.field("time", hhmmss(at)).field("millis", at);
+			if (e.schedTicks != TrainSample.NO_SCHED) {
+				final long sched = es.receivedMillis + e.schedTicks * 50L;
+				w.field("scheduled", hhmmss(sched)).field("scheduledMillis", sched).field("scheduledSec", Math.round(e.schedTicks / 20.0 - age));
+			}
+			w.endObject();
+		}
+		w.endArray();
+	}
+
 	private void writeTrain(JsonWriter w, TrainView v, Snapshot snap, boolean detailed) {
 		final TrainSample s = v.s;
 		final int level = snap.level;
@@ -678,20 +1299,7 @@ public final class ApiHandler {
 				w.field("destination", route.destination);
 			}
 		}
-		if (level >= 1 && s.etaStationIds.length > 0) {
-			w.name("etas").beginArray();
-			for (int i = 0; i < s.etaStationIds.length; i++) {
-				final Topology.Station es = stationMap.get(s.etaStationIds[i]);
-				w.beginObject().idField("stationId", s.etaStationIds[i]);
-				if (es != null) {
-					w.field("station", es.name);
-				}
-				w.field("sec", s.etaTicks[i] / 20);
-				w.field("clock", java.time.LocalTime.ofSecondOfDay(Math.floorMod(java.time.LocalTime.now().toSecondOfDay() + s.etaTicks[i] / 20L, 86400L)).toString().substring(0, 5));
-				w.endObject();
-			}
-			w.endArray();
-		}
+		writeEtas(w, v);
 		if (level >= 2) {
 			w.field("y", s.y, 1);
 			if (!Float.isNaN(s.yaw)) {
@@ -1037,6 +1645,7 @@ public final class ApiHandler {
 			w.beginObject();
 			w.idField("id", s.id);
 			w.field("name", s.name);
+			w.field("slug", stationSlug(s.name));
 			w.field("x", s.x);
 			w.field("z", s.z);
 			w.field("color", hex(s.color));

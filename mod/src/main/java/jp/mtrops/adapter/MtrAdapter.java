@@ -162,10 +162,13 @@ public final class MtrAdapter {
 			s.suspect |= TrainSample.SUSPECT_FROZEN; // Train.simulateTrain 冒頭の早期returnに該当(毎tick何もしない)
 		}
 		final boolean valid = s.onRoute && nextStop >= 0 && nextStop < pathSize;
+		s.nextStopIndex = nextStop;
 		if (valid) {
 			final PathData stopPath = t.path.get(nextStop);
 			s.atStop = t.getSpeed() == 0 && stopPath.dwellTime > 0 && Math.abs(s.railProgress - distances.get(nextStop)) < 1.5;
+			s.elapsedDwellTicks = t.getElapsedDwellTicks();
 			if (s.atStop) {
+				s.curPlatformId = stopPath.savedRailBaseId;
 				final int total = stopPath.dwellTime * 10;
 				s.dwellRemainTicks = Math.max(0, (int) (total - t.getElapsedDwellTicks()));
 				s.dwelling = s.dwellRemainTicks > 0;
@@ -183,7 +186,7 @@ public final class MtrAdapter {
 			s.idealTicks = idealTicks(segments, s.railProgress, s.atStop, t.getElapsedDwellTicks());
 			s.idealNextArrivalTicks = s.atStop ? Double.NaN : idealNextArrival(segments, s.railProgress);
 			s.elapsedTicks = tracker.elapsed(s.id, true, nowTick, s.idealTicks);
-			fillEtas(t, distances, s, segments, dc);
+			fillEtas(t, s, segments, depot, dc);
 		} else {
 			tracker.elapsed(s.id, false, nowTick, Double.NaN);
 		}
@@ -212,76 +215,117 @@ public final class MtrAdapter {
 		return Double.NaN;
 	}
 
+	/** 到着予想を出す範囲(tick)。時刻表API用に2時間先まで(Webの列車詳細などは既定で20分先までに絞る) */
+	private static final int ETA_HORIZON_TICKS = 2 * 3600 * 20;
+
 	/**
-	 * 現在位置より先にある停車駅への、ダイヤ上の残りtick。
-	 * 「ダイヤ上の到着時刻の差」をそのまま使うと、区間をまたぐほど誤差(停車時間の扱いの差など)が積み上がって早く出るため、
-	 * 区間ごとの走行時間(終点時刻 − 始点時刻)を足し上げ、停車時間(PathData.dwellTime × 10 tick)は別に1回だけ足す。
+	 * これから着く停車駅の、MTRの理論上の到着までの残り(tick)。経路の終わりまで(折り返し後の路線も含む)。
+	 * 計算は MTR 3.2.2 の TrainServer.simulateTrain の発車標(ScheduleEntry)の作り方と同じ:
+	 *   いまの位置のダイヤ上の時刻 currentTime と各停車区間の終わりの時刻 endTime の差。停車中は停車の経過分を引く。
+	 *   「無限に繰り返す」車庫は2周目まで見る(MTRと同じく、周回の継ぎ目は最後の駅の時刻に合わせる)。
+	 * 結果は etaIdealTicks に入れ、実績による補正(EtaPlanner.calibrate)はサーバー側で後から行う。
 	 */
-	private static void fillEtas(TrainServer t, List<Double> distances, TrainSample s, List<Siding.TimeSegment> segments, DataCache dc) {
-		if (Double.isNaN(s.idealTicks)) {
+	private static void fillEtas(TrainServer t, TrainSample s, List<Siding.TimeSegment> segments, Depot depot, DataCache dc) {
+		final int size = segments.size();
+		if (size == 0) {
 			return;
 		}
-		final long[] ids = new long[TrainSample.MAX_ETAS];
-		final int[] ticks = new int[TrainSample.MAX_ETAS];
-		int n = 0;
 		try {
-			double remain = s.atStop && s.dwellRemainTicks > 0 ? s.dwellRemainTicks : 0;
-			double prevEnd = s.idealTicks;
+			double currentTime = -1;
+			int start = 0;
 			for (final Siding.TimeSegment seg : segments) {
-				if (n >= ids.length) {
+				if (RailwayData.isBetween(s.railProgress, seg.startRailProgress, seg.endRailProgress)) {
+					currentTime = seg.getTime(s.railProgress);
 					break;
 				}
-				if (seg.endRailProgress <= s.railProgress + 0.5) {
-					continue;
-				}
-				double start = Double.NaN;
-				if (seg.startRailProgress >= s.railProgress - 1e-6) {
-					start = seg.getTime(seg.startRailProgress);
-				}
-				if (Double.isNaN(start) || Double.isInfinite(start)) {
-					start = Math.min(prevEnd, seg.endTime);
-					if (seg.startRailProgress < s.railProgress) {
-						start = s.idealTicks;
+				start++;
+			}
+			if (currentTime < 0 || Double.isNaN(currentTime)) {
+				return;
+			}
+			final double base = -s.elapsedDwellTicks;
+			final boolean repeat = MtrFields.isRepeat(t);
+			final List<long[]> found = new ArrayList<>();
+			long[] pending = null;
+			double offsetTime = 0;
+			double offsetTimeTemp = 0;
+			boolean secondRound = false;
+			for (int i = start; i < size + (repeat ? size : 0) && found.size() < TrainSample.MAX_ETAS; i++) {
+				final Siding.TimeSegment seg = segments.get(i % size);
+				if (seg.savedRailBaseId != 0) {
+					if (secondRound) {
+						offsetTime = offsetTimeTemp - seg.endTime;
+						secondRound = false;
+						pending = null;
+					} else if (pending != null) {
+						found.add(pending);
+						pending = null;
 					}
+					final double ticks = seg.endTime + offsetTime - currentTime + base;
+					if (ticks > ETA_HORIZON_TICKS) {
+						break;
+					}
+					final long[] e = {seg.savedRailBaseId, routeOf(t, seg, depot, dc), Math.round(ticks)};
+					if (repeat) {
+						pending = e;
+					} else {
+						found.add(e);
+					}
+					offsetTimeTemp = seg.endTime;
 				}
-				remain += Math.max(0, seg.endTime - start);
-				prevEnd = seg.endTime;
-				if (seg.savedRailBaseId == 0) {
+				if (i == size - 1) {
+					secondRound = true;
+				}
+			}
+			if (pending != null && found.size() < TrainSample.MAX_ETAS) {
+				found.add(pending);
+			}
+			final List<long[]> ok = new ArrayList<>();
+			for (final long[] e : found) {
+				// 停車中の駅(到着済み)は除く
+				if (ok.isEmpty() && s.atStop && e[0] == s.curPlatformId && e[2] <= 0) {
 					continue;
 				}
-				final Station st = dc.platformIdToStation.get(seg.savedRailBaseId);
-				if (st != null && !contains(ids, n, st.id)) {
-					ids[n] = st.id;
-					ticks[n] = (int) Math.max(0, Math.min(Integer.MAX_VALUE, Math.round(remain)));
-					n++;
+				final Station st = dc.platformIdToStation.get(e[0]);
+				if (st != null) {
+					ok.add(new long[]{st.id, e[0], e[1], Math.max(0, e[2])});
 				}
-				remain += dwellTicksAt(t, distances, seg.endRailProgress);
+			}
+			final int n = ok.size();
+			s.etaStationIds = new long[n];
+			s.etaPlatformIds = new long[n];
+			s.etaRouteIds = new long[n];
+			s.etaIdealTicks = new int[n];
+			s.etaTicks = new int[n];
+			s.etaSchedTicks = new int[n];
+			for (int k = 0; k < n; k++) {
+				final long[] e = ok.get(k);
+				s.etaStationIds[k] = e[0];
+				s.etaPlatformIds[k] = e[1];
+				s.etaRouteIds[k] = e[2];
+				s.etaIdealTicks[k] = (int) Math.min(Integer.MAX_VALUE, e[3]);
+				s.etaTicks[k] = s.etaIdealTicks[k];
+				s.etaSchedTicks[k] = TrainSample.NO_SCHED;
+			}
+		} catch (RuntimeException e) {
+			logRateLimited("到着予想の計算に失敗 (id=" + t.id + ")", e);
+		}
+	}
+
+	/** 停車区間が属する路線。MTRが列車処理で埋めた TimeSegment.routeId を優先し、無ければ経路の停車番号から引く(MTRと同じ方法)。 */
+	private static long routeOf(TrainServer t, Siding.TimeSegment seg, Depot depot, DataCache dc) {
+		if (seg.routeId != 0 || depot == null) {
+			return seg.routeId;
+		}
+		final long[] out = {0};
+		try {
+			final int index = t.getIndex(seg.endRailProgress, true);
+			if (index >= 0 && index < t.path.size()) {
+				RailwayData.useRoutesAndStationsFromIndex(t.path.get(index).stopIndex - 1, depot.routeIds, dc, (currentStationIndex, thisRoute, nextRoute, thisStation, nextStation, lastStation) -> out[0] = thisRoute == null ? 0 : thisRoute.id);
 			}
 		} catch (RuntimeException ignored) {
 		}
-		s.etaStationIds = java.util.Arrays.copyOf(ids, n);
-		s.etaTicks = java.util.Arrays.copyOf(ticks, n);
-	}
-
-	/** 経路が同じ駅を2度通る(往復・周回)とき、2度目以降は先の周回の時刻なので載せない。 */
-	private static boolean contains(long[] ids, int n, long id) {
-		for (int i = 0; i < n; i++) {
-			if (ids[i] == id) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/** 進捗 progress の位置で終わる経路区間の停車時間(tick)。無ければ0。 */
-	private static double dwellTicksAt(TrainServer t, List<Double> distances, double progress) {
-		final int size = Math.min(t.path.size(), distances.size());
-		for (int i = 0; i < size; i++) {
-			if (Math.abs(distances.get(i) - progress) < 1.5 && t.path.get(i).dwellTime > 0) {
-				return t.path.get(i).dwellTime * 10.0;
-			}
-		}
-		return 0;
+		return out[0];
 	}
 
 	private static double idealNextArrival(List<Siding.TimeSegment> segments, double progress) {
@@ -422,6 +466,7 @@ public final class MtrAdapter {
 		boolean added = false;
 		long prevStation = 0;
 		double prevEnd = 0;
+		int prevEndIndex = -1;
 		int i = 0;
 		final int n = t.path.size();
 		while (i < n) {
@@ -438,18 +483,19 @@ public final class MtrAdapter {
 			if (prevStation != 0 && prevStation != st && end > prevEnd) {
 				final String key = prevStation + ">" + st;
 				if (!out.containsKey(key) && end - prevEnd < 30000) {
-					out.put(key, buildSection(t, distances, prevStation, st, prevEnd, end));
+					out.put(key, buildSection(t, distances, prevStation, st, prevEnd, end, prevEndIndex + 1, j));
 					added = true;
 				}
 			}
 			prevStation = st;
 			prevEnd = end;
+			prevEndIndex = j;
 			i = j + 1;
 		}
 		return added;
 	}
 
-	private static Geometry.Section buildSection(TrainServer t, List<Double> distances, long from, long to, double start, double end) {
+	private static Geometry.Section buildSection(TrainServer t, List<Double> distances, long from, long to, double start, double end, int firstIndex, int lastIndex) {
 		final List<double[]> pts = new ArrayList<>();
 		for (double p = start; p < end; p += SAMPLE_STEP) {
 			addPoint(pts, positionAt(t, distances, p));
@@ -460,6 +506,7 @@ public final class MtrAdapter {
 		sec.fromStationId = from;
 		sec.toStationId = to;
 		sec.distance = end - start;
+		sec.mode = t.transportMode.toString().toLowerCase(java.util.Locale.ROOT);
 		final int count = Math.min(MAX_SECTION_POINTS, simple.size());
 		sec.points = new int[count * 3];
 		for (int k = 0; k < count; k++) {
@@ -468,6 +515,27 @@ public final class MtrAdapter {
 			sec.points[k * 3] = (int) Math.round(pt[0]);
 			sec.points[k * 3 + 1] = (int) Math.round(pt[1]);
 			sec.points[k * 3 + 2] = (int) Math.round(pt[2]);
+		}
+		// レールの種別ごとの区切り(同じ種別が続くところはまとめる)
+		final List<String> types = new ArrayList<>();
+		final List<float[]> ranges = new ArrayList<>();
+		for (int k = Math.max(0, firstIndex); k <= lastIndex && k < t.path.size() && k < distances.size(); k++) {
+			final String type = t.path.get(k).rail.railType.toString();
+			final float a = (float) Math.max(0, (k == 0 ? 0 : distances.get(k - 1)) - start);
+			final float b = (float) Math.max(0, distances.get(k) - start);
+			if (!types.isEmpty() && types.get(types.size() - 1).equals(type)) {
+				ranges.get(ranges.size() - 1)[1] = b;
+			} else {
+				types.add(type);
+				ranges.add(new float[]{a, b});
+			}
+		}
+		sec.partTypes = types.toArray(new String[0]);
+		sec.partFrom = new float[ranges.size()];
+		sec.partTo = new float[ranges.size()];
+		for (int k = 0; k < ranges.size(); k++) {
+			sec.partFrom[k] = ranges.get(k)[0];
+			sec.partTo[k] = ranges.get(k)[1];
 		}
 		return sec;
 	}
