@@ -733,12 +733,12 @@ public class CoreSelfTest {
 	static void diaTests() throws Exception {
 		System.out.println("[custom diagram]");
 		// 走行時間(MTRと同じ1tick刻み)
-		final DiaRunTime.Rail sd = new DiaRunTime.Rail(); sd.length = 40;
-		final DiaRunTime.Rail line = new DiaRunTime.Rail(); line.length = 1000; line.maxSpeed = 1.0F;
-		final DiaRunTime.Rail pf = new DiaRunTime.Rail(); pf.length = 40; pf.dwell = 20;
-		final DiaRunTime.Rail line2 = new DiaRunTime.Rail(); line2.length = 500; line2.maxSpeed = 1.0F;
-		final DiaRunTime.Rail pf2 = new DiaRunTime.Rail(); pf2.length = 40; pf2.dwell = 20;
-		final DiaRunTime.Result rt = DiaRunTime.compute(new DiaRunTime.Rail[]{sd, line, pf, line2, pf2}, 40, 2, 20, 0.01F, 0.3F);
+		final DiaRailTime.Rail sd = new DiaRailTime.Rail(); sd.length = 40;
+		final DiaRailTime.Rail line = new DiaRailTime.Rail(); line.length = 1000; line.maxSpeed = 1.0F;
+		final DiaRailTime.Rail pf = new DiaRailTime.Rail(); pf.length = 40; pf.dwell = 20;
+		final DiaRailTime.Rail line2 = new DiaRailTime.Rail(); line2.length = 500; line2.maxSpeed = 1.0F;
+		final DiaRailTime.Rail pf2 = new DiaRailTime.Rail(); pf2.length = 40; pf2.dwell = 20;
+		final DiaRailTime.Result rt = DiaRailTime.compute(new DiaRailTime.Rail[]{sd, line, pf, line2, pf2}, 40, 2, 20, 0.01F, 0.3F);
 		check(rt.arriveTick[2] > 1000 && rt.arriveTick[2] < 1300 && rt.arriveTick[0] < 0 && rt.endTick[0] >= 0 && rt.endTick[1] < rt.arriveTick[2], "走行時間: 1000ブロックを最高72km/h・加速0.01で約1100tick: " + rt.arriveTick[2]);
 		check(rt.arriveTick[4] - rt.arriveTick[2] > 500 + 200 && rt.arriveTick[4] - rt.arriveTick[2] < 900, "走行時間: 停車(10秒=200tick)を含む次駅まで: " + (rt.arriveTick[4] - rt.arriveTick[2]));
 

@@ -1,7 +1,7 @@
 package jp.mtrops.adapter;
 
 import jp.mtrops.core.DiaModel;
-import jp.mtrops.core.DiaRunTime;
+import jp.mtrops.core.DiaRailTime;
 import mtr.data.DataCache;
 import mtr.data.Depot;
 import mtr.data.Platform;
@@ -131,10 +131,10 @@ public final class DiaAdapter {
 	private static DiaModel.Profile profileOf(TrainServer t, Siding sd, Depot depot, DataCache dc, Map<java.util.UUID, Platform> byPos) {
 		final List<PathData> path = t.path;
 		final int n = path.size();
-		final DiaRunTime.Rail[] rails = new DiaRunTime.Rail[n];
+		final DiaRailTime.Rail[] rails = new DiaRailTime.Rail[n];
 		for (int i = 0; i < n; i++) {
 			final PathData pd = path.get(i);
-			final DiaRunTime.Rail r = new DiaRunTime.Rail();
+			final DiaRailTime.Rail r = new DiaRailTime.Rail();
 			r.length = pd.rail.getLength();
 			r.maxSpeed = pd.rail.railType.canAccelerate ? pd.rail.railType.maxBlocksPerTick : -1;
 			r.dwell = pd.dwellTime;
@@ -142,7 +142,7 @@ public final class DiaAdapter {
 			rails[i] = r;
 		}
 		final float railLength = railLength(t);
-		final DiaRunTime.Result res = DiaRunTime.compute(rails, railLength, t.trainCars, t.spacing, t.accelerationConstant, RailType.getDefaultMaxBlocksPerTick(t.transportMode));
+		final DiaRailTime.Result res = DiaRailTime.compute(rails, railLength, t.trainCars, t.spacing, t.accelerationConstant, RailType.getDefaultMaxBlocksPerTick(t.transportMode));
 
 		final DiaModel.Profile p = new DiaModel.Profile();
 		p.depotId = depot.id;
