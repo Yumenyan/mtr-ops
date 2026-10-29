@@ -227,6 +227,33 @@ public class DevServer {
 		System.out.println("開発用サーバー: http://127.0.0.1:" + server.port() + "/   (Ctrl+C で終了)");
 		System.out.println("Webアプリのディレクトリ: " + webDir);
 
+		// 折り返し(星陽線の下り⇔上り)と、時刻表API用の車庫ごとの路線
+		RETURN.put(l1.id, l6);
+		RETURN.put(l5.id, l6);
+		RETURN.put(l6.id, l1);
+		final Map<Long, Line> depotLines = new LinkedHashMap<>();
+		depotLines.put(depot1, l1);
+		depotLines.put(depot2, l2);
+		final SectionStats stats = new SectionStats();
+		for (final Line l : lines) {
+			for (int i = 1; i < l.sts.size(); i++) {
+				final double ideal = dist(l.sts.get(i - 1), l.sts.get(i)) / 15.0 + 15;
+				stats.add(l.sts.get(i - 1).id(), l.sts.get(i).id(), ideal * 1.15, ideal, System.currentTimeMillis());
+			}
+		}
+		// カスタムダイヤ(疑似): 港南車庫(港南線・空港線)の空港線をダイヤ管理にしたことにする
+		{
+			final DiaModel.Config dc = new DiaModel.Config();
+			final DiaModel.RouteSetting rs = new DiaModel.RouteSetting(); rs.routeId = l4.id; rs.custom = true;
+			dc.routes.put(l4.id, rs);
+			final DiaModel.DepotPlan dp2 = new DiaModel.DepotPlan(); dp2.depotId = depot2; dp2.first = 5 * 3600; dp2.last = 24 * 3600;
+			dp2.periods.add(new DiaModel.Period("終日", 0, 2 * DiaModel.DAY, 480));
+			dc.plans.put(depot2, dp2);
+			final int utc = java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 1000;
+			final byte[] b = DiaSync.encode(java.util.TimeZone.getDefault().getID(), utc, dc, Map.of(depot2, profileOf(depot2, l2)), List.of(depot2));
+			store.setDia(DiaSync.decode(b));
+		}
+
 		long tick = 20 * 600; // ゲーム内時刻の見た目用
 		int seq = 0;
 		final long startNanos = System.nanoTime();
@@ -273,8 +300,94 @@ public class DevServer {
 			for (final byte[] part : SnapshotCodec.encode(snap, cfg.maxLevel, cfg.maxSnapshotBytes)) {
 				store.acceptSnapshotPart(SnapshotCodec.decode(part));
 			}
+			for (final byte[] part : EtaCodec.encode(samples, seq, snap.wallMillis, 900_000)) {
+				store.acceptEtaPart(EtaCodec.decode(part));
+			}
+			if (seq % 40 == 1) {
+				store.setSchedule(ScheduleSync.decode(scheduleSync(depotLines, stats)));
+			}
 			Thread.sleep(500);
 		}
+	}
+
+	/** 折り返し先の路線(星陽線の上り⇔下りなど)。無ければ折り返さない */
+	static final Map<Long, Line> RETURN = new HashMap<>();
+
+	/**
+	 * 到着見込み(疑似): 15m/s + 各駅15秒停車。終点に着いたら折り返し先の路線へ続けて2時間先まで。
+	 * ホームIDは 駅ID*10+路線ID(路線ごとに別のホーム)。遅れている列車は、定刻 = 見込み − 遅れ(秒)。
+	 */
+	static void fillEtas(Sim s, TrainSample t, int next, double distToNext) {
+		Line l = s.line;
+		int n = l.sts.size();
+		int idx = s.atStop ? indexNear(l, s.pos) + 1 : next;
+		double ticks = s.atStop ? s.dwellLeftTicks : 0;
+		double dd = s.atStop ? -1 : distToNext;
+		boolean first = true;
+		final List<long[]> out = new ArrayList<>();
+		int guard = 0;
+		while (out.size() < TrainSample.MAX_ETAS && ticks < 2 * 3600 * 20 && guard++ < 500) {
+			if (idx >= n) {
+				if (l.loop) {
+					idx = idx % n;
+				} else {
+					final Line back = RETURN.get(l.id);
+					if (back == null) break;
+					ticks += 60 * 20; // 折り返しの時間
+					l = back;
+					n = l.sts.size();
+					idx = 1;
+					dd = -1;
+				}
+			}
+			final St to = l.sts.get(idx % n);
+			if (dd < 0) dd = dist(l.sts.get((idx - 1 + n) % n), to);
+			ticks += dd / 15.0 * 20 + (first ? 0 : 15 * 20);
+			out.add(new long[]{to.id(), to.id() * 10 + l.id, l.id, (long) ticks});
+			first = false;
+			dd = -1;
+			idx++;
+		}
+		final int k = out.size();
+		t.etaStationIds = new long[k]; t.etaPlatformIds = new long[k]; t.etaRouteIds = new long[k];
+		t.etaTicks = new int[k]; t.etaIdealTicks = new int[k]; t.etaSchedTicks = new int[k];
+		for (int i = 0; i < k; i++) {
+			final long[] e = out.get(i);
+			t.etaStationIds[i] = e[0]; t.etaPlatformIds[i] = e[1]; t.etaRouteIds[i] = e[2];
+			t.etaTicks[i] = (int) e[3]; t.etaIdealTicks[i] = (int) e[3];
+			t.etaSchedTicks[i] = s.delaySec >= 30 ? (int) e[3] - s.delaySec * 20 : TrainSample.NO_SCHED;
+		}
+	}
+
+	/** 時刻表API用の同期データ(疑似): 車庫ごとに最初の路線の理想走行と、6分ごとの出庫予定。 */
+	static byte[] scheduleSync(Map<Long, Line> depotLines, SectionStats stats) {
+		final Map<Long, DiaModel.Profile> profs = new LinkedHashMap<>();
+		final Map<Long, List<Long>> deploys = new LinkedHashMap<>();
+		final long now = System.currentTimeMillis();
+		for (final Map.Entry<Long, Line> e : depotLines.entrySet()) {
+			profs.put(e.getKey(), profileOf(e.getKey(), e.getValue()));
+			final List<Long> list = new ArrayList<>();
+			final long step = 6 * 60_000L;
+			for (long t = now - now % step + step; t < now + 3 * 3600_000L; t += step) list.add(t + e.getKey() % 7 * 20_000);
+			deploys.put(e.getKey(), list);
+		}
+		return ScheduleSync.encode(now, profs, deploys, stats, 900_000);
+	}
+
+	static DiaModel.Profile profileOf(long depot, Line l) {
+		final DiaModel.Profile p = new DiaModel.Profile();
+		p.depotId = depot;
+		double t = 60;
+		for (int i = 0; i < l.sts.size(); i++) {
+			if (i > 0) t += dist(l.sts.get(i - 1), l.sts.get(i)) / 15.0;
+			final DiaModel.Stop st = new DiaModel.Stop();
+			st.pathIndex = i * 3; st.stationId = l.sts.get(i).id(); st.platformId = st.stationId * 10 + l.id; st.routeId = l.id;
+			st.station = l.sts.get(i).name(); st.platform = Integer.toString(1 + (int) (l.id % 2)); st.stationIndex = i;
+			st.arr = t; st.dep = t + 15; t += 15;
+			p.stops.add(st);
+		}
+		p.total = t + 60;
+		return p;
 	}
 
 	static Line line(long id, String name, int color, boolean loop, String number, St... sts) {
@@ -397,22 +510,7 @@ public class DevServer {
 			t.nextStationId = l.sts.get(next).id();
 			t.prevStationId = l.sts.get((next - 1 + l.sts.size()) % l.sts.size()).id();
 		}
-		{	// 到着見込み(疑似): 15m/s + 各駅15秒停車
-			final int n = l.sts.size();
-			int first = s.atStop ? (indexNear(l, s.pos) + 1) : next;
-			double ticks = s.atStop ? s.dwellLeftTicks : 0;
-			double dd = s.atStop ? 0 : d[0];
-			final List<Long> ids = new ArrayList<>(); final List<Integer> tk = new ArrayList<>();
-			for (int k = 0; k < Math.min(n, TrainSample.MAX_ETAS); k++) {
-				final int idx = first + k;
-				if (!l.loop && idx >= n) break;
-				if (k > 0 || s.atStop) dd = dist(l.sts.get((idx - 1 + n) % n), l.sts.get(idx % n));
-				ticks += dd / 15.0 * 20 + (k > 0 ? 15 * 20 : 0);
-				ids.add(l.sts.get(idx % n).id()); tk.add((int) ticks);
-			}
-			t.etaStationIds = ids.stream().mapToLong(Long::longValue).toArray();
-			t.etaTicks = tk.stream().mapToInt(Integer::intValue).toArray();
-		}
+		fillEtas(s, t, next, d[0]);
 
 		t.idealTicks = 0;
 		t.elapsedTicks = s.delaySec * 20.0;

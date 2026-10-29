@@ -1,5 +1,6 @@
 {
   "key.mtrops.open_manager": "車庫・編成管理を開く",
   "key.mtrops.open_web": "運行情報Webを開く",
-  "key.categories.mtrops": "MTR Ops"
+  "key.categories.mtrops": "MTR Ops",
+  "item.mtrops.dia_dashboard": "ダイヤ式鉄道ダッシュボード"
 }

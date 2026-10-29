@@ -1,0 +1,2 @@
+package net.fabricmc.fabric.api.event.lifecycle.v1;
+public final class ServerLifecycleEvents { public static final net.fabricmc.fabric.api.event.Event<ServerStarted> SERVER_STARTED=null; public static final net.fabricmc.fabric.api.event.Event<ServerStopping> SERVER_STOPPING=null; public interface ServerStarted { void onServerStarted(net.minecraft.server.MinecraftServer s); } public interface ServerStopping { void onServerStopping(net.minecraft.server.MinecraftServer s); } }

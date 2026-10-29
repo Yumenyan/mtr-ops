@@ -1,0 +1,2 @@
+package net.minecraft.world.entity.player;
+public abstract class Player { public java.util.UUID getUUID(){return null;} public com.mojang.authlib.GameProfile getGameProfile(){return null;} public net.minecraft.world.item.ItemStack getItemInHand(net.minecraft.world.InteractionHand h){return null;} public void displayClientMessage(net.minecraft.network.chat.Component c, boolean b){} public boolean hasPermissions(int l){return false;} public double getX(){return 0;} public double getZ(){return 0;} }

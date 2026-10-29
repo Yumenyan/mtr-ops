@@ -3,6 +3,7 @@ package jp.mtrops.api;
 import jp.mtrops.adapter.MtrClientAdapter;
 import jp.mtrops.client.OpsClient;
 import jp.mtrops.core.EntryMatcher;
+import jp.mtrops.core.EtaCodec;
 import jp.mtrops.core.OpsRegistry;
 import jp.mtrops.core.Snapshot;
 import jp.mtrops.core.TrainView;
@@ -29,7 +30,9 @@ import java.util.Map;
  *   Api.entryDelaySec(e)  遅れ(秒。遅れなし/不明は 0)    Api.entryDelayMin(e) 遅れ(分。切り上げ)
  *   Api.entryNumber(e)    編成番号                      Api.entryTypeId(e)  車両ID(mtr_custom_resources.json の id)
  *   Api.entryTypeName(e)  車両名(同 name)               Api.entryTrainId(e) 列車ID(文字列)
- * ScheduleEntry は列車IDを持たないため、同じ路線で、その駅(ホーム)へ向かっている列車を到着の近い順に並べ、
+ *   Api.entryExpectedMillis(e) 到着見込み(UNIXミリ秒、mtrops の補正済み)
+ * どれも第2引数にホームIDを渡せる(例 Api.entryNumber(e, platformId))。省略するとMTRの到着予定一覧から探す。
+ * ScheduleEntry は列車IDを持たないため、そのホームへの到着予想が早い順に列車を並べ、
  * 同じホーム・路線のエントリを到着時刻順に並べたときの順位で対応づける。該当する列車が無いときは空文字/0。
  *
  * どのメソッドも例外を投げず、スレッドセーフ(スクリプトは別スレッドで呼ばれることがある)。
@@ -109,29 +112,66 @@ public final class MtrOpsApi {
 
 	// ------------------------------------------------------------------ 発車標(ScheduleEntry)
 
-	private static final long SEEN_TTL_NANOS = 2_000_000_000L;
-	/** ClientData から到着予定の一覧が読めない版向け: 直近に問い合わせされたエントリの到着時刻(順位の算出に使う) */
-	private static final Map<String, Map<Long, Long>> SEEN = new HashMap<>();
+	private static final class Cand {
+		final TrainView view;
+		final int ticks;
 
-	/** 発車標の1エントリに対応する列車。見つからなければ null。 */
-	private static TrainView trainOfEntry(Object entry) {
+		Cand(TrainView view, int ticks) {
+			this.view = view;
+			this.ticks = ticks;
+		}
+	}
+
+	private static long platformArg(Object platformId) {
+		return platformId instanceof Number ? (long) ((Number) platformId).doubleValue() : -1;
+	}
+
+	/**
+	 * 発車標の1エントリに対応する列車。見つからなければ null。
+	 * 同じホーム・同じ路線のエントリを到着時刻順に並べた順位 n と、そのホームへの到着予想が早い順の n 番目の列車を対応づける。
+	 * 到着予想(サーバーから約1秒ごと)が無いときは、路線上の位置から並べる(EntryMatcher)。
+	 */
+	private static TrainView trainOfEntry(Object entry, Object platformId) {
 		try {
 			final Snapshot snap = OpsClient.STORE.live();
 			if (snap == null || entry == null) {
 				return null;
 			}
-			final MtrClientAdapter.EntryData d = MtrClientAdapter.readEntry(entry);
-			if (d.routeId < 0 || d.platformId < 0) {
+			final MtrClientAdapter.EntryData d = MtrClientAdapter.readEntry(entry, platformArg(platformId));
+			if (d.routeId < 0 || d.platformId <= 0) {
 				return null;
+			}
+			final int rank = rankOf(d);
+			final List<Cand> cands = new ArrayList<>();
+			for (final TrainView v : snap.trains) {
+				if (!v.s.onRoute || v.s.routeId != d.routeId && !hasRouteAt(v.s.id, d.platformId, d.routeId)) {
+					continue;
+				}
+				for (final EtaCodec.Entry e : OpsClient.STORE.etasOf(v.s.id)) {
+					if (e.platformId == d.platformId && (e.routeId == 0 || e.routeId == d.routeId)) {
+						cands.add(new Cand(v, e.ticks));
+						break;
+					}
+				}
+			}
+			if (!cands.isEmpty()) {
+				cands.sort(Comparator.comparingInt(c -> c.ticks));
+				return rank < cands.size() ? cands.get(rank).view : null;
 			}
 			final long station = MtrClientAdapter.stationOfPlatform(d.platformId);
-			if (station == 0) {
-				return null;
-			}
-			return EntryMatcher.match(snap, OpsClient.STORE.topology(), d.routeId, station, rankOf(d));
+			return station == 0 ? null : EntryMatcher.match(snap, OpsClient.STORE.topology(), d.routeId, station, rank);
 		} catch (RuntimeException e) {
 			return null;
 		}
+	}
+
+	private static boolean hasRouteAt(long trainId, long platformId, long routeId) {
+		for (final EtaCodec.Entry e : OpsClient.STORE.etasOf(trainId)) {
+			if (e.platformId == platformId && e.routeId == routeId) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** 同じホーム・同じ路線のエントリを到着時刻順に並べたときの、このエントリの順位(0始まり)。 */
@@ -139,39 +179,33 @@ public final class MtrOpsApi {
 		if (d.arrivalMillis == Long.MIN_VALUE) {
 			return 0;
 		}
-		final List<MtrClientAdapter.EntryData> all = MtrClientAdapter.entriesOfPlatform(d.platformId);
-		if (all != null && !all.isEmpty()) {
-			final List<Long> times = new ArrayList<>();
-			for (final MtrClientAdapter.EntryData e : all) {
-				if (e.routeId == d.routeId && e.arrivalMillis != Long.MIN_VALUE) {
-					times.add(e.arrivalMillis);
-				}
-			}
-			times.sort(Comparator.naturalOrder());
-			final int i = times.indexOf(d.arrivalMillis);
-			if (i >= 0) {
-				return i;
+		final List<Long> times = new ArrayList<>();
+		for (final MtrClientAdapter.EntryData e : MtrClientAdapter.entriesOfPlatform(d.platformId)) {
+			if (e.routeId == d.routeId) {
+				times.add(e.arrivalMillis);
 			}
 		}
-		// 一覧が読めない: 直近2秒以内に問い合わせたエントリのうち、より早いものの数(スクリプトが到着順に問い合わせる前提)
-		final long now = System.nanoTime();
-		synchronized (SEEN) {
-			final Map<Long, Long> m = SEEN.computeIfAbsent(d.routeId + ":" + d.platformId, k -> new HashMap<>());
-			m.values().removeIf(t -> now - t > SEEN_TTL_NANOS);
-			m.put(d.arrivalMillis, now);
-			int rank = 0;
-			for (final long t : m.keySet()) {
-				if (t < d.arrivalMillis) {
-					rank++;
-				}
+		times.sort(Comparator.naturalOrder());
+		final int i = times.indexOf(d.arrivalMillis);
+		return Math.max(0, i);
+	}
+
+	private static EtaCodec.Entry etaOf(TrainView v, MtrClientAdapter.EntryData d) {
+		for (final EtaCodec.Entry e : OpsClient.STORE.etasOf(v.s.id)) {
+			if (e.platformId == d.platformId) {
+				return e;
 			}
-			return rank;
 		}
+		return null;
 	}
 
 	/** 遅れ(秒)。遅れていない・対応する列車なしは 0。早着(負の値)は 0 にする。 */
 	public static int entryDelaySec(Object entry) {
-		final TrainView v = trainOfEntry(entry);
+		return entryDelaySec(entry, null);
+	}
+
+	public static int entryDelaySec(Object entry, Object platformId) {
+		final TrainView v = trainOfEntry(entry, platformId);
 		return v == null ? 0 : Math.max(0, v.delaySec);
 	}
 
@@ -180,33 +214,57 @@ public final class MtrOpsApi {
 		return (entryDelaySec(entry) + 59) / 60;
 	}
 
+	public static int entryDelayMin(Object entry, Object platformId) {
+		return (entryDelaySec(entry, platformId) + 59) / 60;
+	}
+
 	/** 編成番号。無ければ空文字。 */
 	public static String entryNumber(Object entry) {
-		final TrainView v = trainOfEntry(entry);
+		return entryNumber(entry, null);
+	}
+
+	public static String entryNumber(Object entry, Object platformId) {
+		final TrainView v = trainOfEntry(entry, platformId);
 		return v == null || v.s.formationId == null ? "" : v.s.formationId;
 	}
 
 	/** 車両ID(mtr_custom_resources.json の id。例 mtr_custom_train_xxx)。無ければ空文字。 */
 	public static String entryTypeId(Object entry) {
-		final TrainView v = trainOfEntry(entry);
+		return entryTypeId(entry, null);
+	}
+
+	public static String entryTypeId(Object entry, Object platformId) {
+		final TrainView v = trainOfEntry(entry, platformId);
 		return v == null || v.s.trainType == null ? "" : v.s.trainType;
 	}
 
 	/** 車両名(mtr_custom_resources.json の name)。 */
 	public static String entryTypeName(Object entry) {
-		final String id = entryTypeId(entry);
+		return entryTypeName(entry, null);
+	}
+
+	public static String entryTypeName(Object entry, Object platformId) {
+		final String id = entryTypeId(entry, platformId);
 		return id.isEmpty() ? "" : MtrClientAdapter.typeName(id);
 	}
 
 	/** 列車ID(64bitなので文字列)。無ければ空文字。 */
 	public static String entryTrainId(Object entry) {
-		final TrainView v = trainOfEntry(entry);
+		return entryTrainId(entry, null);
+	}
+
+	public static String entryTrainId(Object entry, Object platformId) {
+		final TrainView v = trainOfEntry(entry, platformId);
 		return v == null ? "" : Long.toString(v.s.id);
 	}
 
 	/** 編成の系列名(登録した系列。空なら車両名)。 */
 	public static String entrySeries(Object entry) {
-		final TrainView v = trainOfEntry(entry);
+		return entrySeries(entry, null);
+	}
+
+	public static String entrySeries(Object entry, Object platformId) {
+		final TrainView v = trainOfEntry(entry, platformId);
 		if (v == null) {
 			return "";
 		}
@@ -214,6 +272,24 @@ public final class MtrOpsApi {
 			return v.s.series;
 		}
 		return v.s.trainType == null ? "" : MtrClientAdapter.typeName(v.s.trainType);
+	}
+
+	/**
+	 * そのホームへの到着見込み(UNIXミリ秒、mtrops の補正済み。カスタムダイヤは時刻表の待ち合わせも反映)。
+	 * 対応する列車が無い(まだ出庫していない等)ときは、エントリの到着時刻(MTRの計算)をそのまま返す。
+	 */
+	public static double entryExpectedMillis(Object entry) {
+		return entryExpectedMillis(entry, null);
+	}
+
+	public static double entryExpectedMillis(Object entry, Object platformId) {
+		final MtrClientAdapter.EntryData d = MtrClientAdapter.readEntry(entry, platformArg(platformId));
+		final TrainView v = trainOfEntry(entry, platformId);
+		final EtaCodec.Entry e = v == null ? null : etaOf(v, d);
+		if (e == null) {
+			return d.arrivalMillis == Long.MIN_VALUE ? 0 : d.arrivalMillis;
+		}
+		return OpsClient.STORE.etas().receivedMillis + e.ticks * 50.0;
 	}
 
 	private static TrainView find(Object trainId) {

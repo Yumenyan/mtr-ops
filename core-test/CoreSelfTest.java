@@ -57,6 +57,7 @@ public class CoreSelfTest {
 		geometryTests();
 		entryMatcherTests();
 		etaTests();
+		diaTests();
 		System.out.println("\n" + passed + " passed, " + failed + " failed");
 		System.exit(failed == 0 ? 0 : 1);
 	}
@@ -612,16 +613,238 @@ public class CoreSelfTest {
 		check(EntryMatcher.candidates(snap, topo, 5, 2).size() == 1, "通り過ぎた列車は候補にならない(駅2は102のみ)");
 	}
 
+	static TrainSample etaSample(long id, long[] st, int[] ideal) {
+		final TrainSample s = new TrainSample();
+		s.id = id; s.onRoute = true;
+		s.etaStationIds = st;
+		s.etaPlatformIds = new long[st.length];
+		s.etaRouteIds = new long[st.length];
+		for (int i = 0; i < st.length; i++) { s.etaPlatformIds[i] = st[i] * 10; s.etaRouteIds[i] = 5; }
+		s.etaIdealTicks = ideal;
+		s.etaTicks = ideal.clone();
+		s.etaSchedTicks = new int[st.length];
+		Arrays.fill(s.etaSchedTicks, TrainSample.NO_SCHED);
+		return s;
+	}
+
 	static void etaTests() throws Exception {
 		System.out.println("[eta]");
-		final Snapshot snap = new Snapshot();
-		final TrainView v = new TrainView();
-		v.s.id = 1; v.s.etaStationIds = new long[]{5, 6}; v.s.etaTicks = new int[]{200, 1500};
-		snap.trains.add(v);
-		final SnapshotCodec.Part p = SnapshotCodec.decode(SnapshotCodec.encode(snap, 4, 900000).get(0));
-		final TrainSample r = p.snapshot.trains.get(0).s;
-		check(r.etaStationIds.length == 2 && r.etaStationIds[1] == 6 && r.etaTicks[1] == 1500, "到着見込み(駅ID+残りtick)が符号化で往復する");
+		// 専用パケットで往復
+		final TrainSample a = etaSample(1, new long[]{5, 6}, new int[]{200, 1500});
+		a.etaSchedTicks[1] = 1400;
+		final List<byte[]> parts = EtaCodec.encode(List.of(a), 3, 1000L, 900000);
+		final ClientStore cs = new ClientStore();
+		for (final byte[] b : parts) cs.acceptEtaPart(EtaCodec.decode(b));
+		final List<EtaCodec.Entry> back = cs.etasOf(1);
+		check(back.size() == 2 && back.get(1).stationId == 6 && back.get(1).ticks == 1500 && back.get(1).schedTicks == 1400 && back.get(0).platformId == 50 && back.get(0).schedTicks == TrainSample.NO_SCHED, "到着予想(駅・ホーム・路線・見込み・定刻)が専用パケットで往復する");
+		final List<TrainSample> many = new ArrayList<>();
+		for (int i = 0; i < 400; i++) many.add(etaSample(i, new long[]{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, new int[]{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}));
+		final List<byte[]> big = EtaCodec.encode(many, 4, 0, 30000);
+		final ClientStore cs2 = new ClientStore();
+		Collections.reverse(big);
+		for (final byte[] b : big) cs2.acceptEtaPart(EtaCodec.decode(b));
+		check(big.size() > 1 && cs2.etas().byTrain.size() == 400, "大きいときは分割して送り、揃ったら差し替える (" + big.size() + "パート)");
+
+		// 駅間の実績で補正(遠い駅ほど早すぎる予想にならない)
+		final SectionStats stats = new SectionStats();
+		check(stats.add(1, 2, 120, 100, 0) && !stats.add(1, 2, 1000, 100, 0), "実績を足す(比率が極端なもの=待避などは捨てる)");
+		stats.add(2, 3, 300, 200, 0);
+		final TrainSample c = etaSample(2, new long[]{2, 3}, new int[]{2000, 6000});
+		EtaPlanner.calibrate(c, 1, stats);
+		check(c.etaTicks[0] == 2400 && c.etaTicks[1] == 2400 + 6000, "区間ごとの比率で伸ばして積み上げる: " + Arrays.toString(c.etaTicks));
+		final TrainSample c2 = etaSample(3, new long[]{2, 3}, new int[]{2000, 6000});
+		EtaPlanner.calibrate(c2, 0, stats);
+		check(c2.etaTicks[0] == 2000 && c2.etaTicks[1] == 2000 + 6000, "直前の駅が分からない最初の区間は補正しない");
+		check(Math.abs(stats.ratio(9, 9) - 1) < 1e-9 && Math.abs(stats.ratio(1, 2) - 1.2) < 1e-9, "実績が無い区間の比率は1");
+
+		// カスタムダイヤ: 早く着いたら発車時刻まで待つ。時刻表の到着(定刻)を出す
+		final DiaModel.Profile prof = profile(1, stop(1, 10, 100, 0, 30), stop(2, 11, 110, 100, 130), stop(3, 12, 120, 200, 230));
+		final DiaModel.Run run = new DiaModel.Run();
+		run.depotId = 1; run.no = 1;
+		run.arr = new int[]{1000, 1100, 1300}; run.dep = new int[]{1030, 1200, 1330}; run.hold = new int[3];
+		final TrainSample d = new TrainSample();
+		d.onRoute = true;
+		d.etaStationIds = new long[]{11, 12}; d.etaPlatformIds = new long[]{110, 120}; d.etaRouteIds = new long[]{5, 5};
+		d.etaTicks = new int[]{40 * 20, (40 + 30 + 70) * 20}; d.etaSchedTicks = new int[]{0, 0};
+		// いま 1060秒(区間1の途中)。駅11へは40秒後=1100(定刻)、駅11の発車は時刻表で1200 → 駅12は 1200+70=1270
+		EtaPlanner.applyTimetable(d, prof, run, 0, -1, 1060, 3);
+		check(d.etaSchedTicks[0] == 40 * 20 && d.etaSchedTicks[1] == 240 * 20, "定刻(時刻表の到着)を入れる: " + Arrays.toString(d.etaSchedTicks));
+		check(d.etaTicks[0] == 40 * 20 && d.etaTicks[1] == (140 + 70) * 20, "早着の駅では発車時刻まで待つ見込みにする: " + Arrays.toString(d.etaTicks));
+		// 遅れ: いま1150秒で駅11まであと40秒(=1190着)。発車1200には最短停車(3秒+ドア)で間に合わないので遅れて出る
+		final TrainSample e = new TrainSample();
+		e.onRoute = true;
+		e.etaStationIds = new long[]{11, 12}; e.etaPlatformIds = new long[]{110, 120}; e.etaRouteIds = new long[]{5, 5};
+		e.etaTicks = new int[]{40 * 20, (40 + 30 + 70) * 20}; e.etaSchedTicks = new int[]{0, 0};
+		EtaPlanner.applyTimetable(e, prof, run, 0, -1, 1150, 3);
+		final int minDwell = 3 * 20 + EtaPlanner.DOOR_TICKS;
+		check(e.etaTicks[1] == 40 * 20 + minDwell + 70 * 20 && e.etaSchedTicks[1] == 150 * 20, "遅れているときは最短の停車で出る: " + Arrays.toString(e.etaTicks));
+
+		// 時刻表API用の同期と、駅の時刻表
+		final Map<Long, DiaModel.Profile> profs = new LinkedHashMap<>();
+		profs.put(1L, prof);
+		final long now = System.currentTimeMillis();
+		final Map<Long, List<Long>> dep = new LinkedHashMap<>();
+		dep.put(1L, List.of(now + 60_000, now + 660_000));
+		final ScheduleSync.State ss = ScheduleSync.decode(ScheduleSync.encode(now, profs, dep, stats, 900000));
+		check(ss.profiles.get(1L).stops.size() == 3 && ss.deploys.get(1L).length == 2 && Math.abs(ss.stats.ratio(1, 2) - 1.2) < 1e-9, "時刻表の同期(理想走行・出庫予定・実績)");
+		final Map<String, double[]> runs = ScheduleSync.idealRunTimes(profs);
+		check(Math.abs(runs.get(SectionStats.key(10, 11))[0] - 70) < 1e-9 && Math.abs(runs.get(SectionStats.key(10, 11))[1] - 30) < 1e-9, "駅間の走行時間と停車時間");
+
+		final ClientStore st = new ClientStore();
+		final Topology topo = new Topology();
+		for (long id = 10; id <= 12; id++) {
+			final Topology.Station x = new Topology.Station(); x.id = id; x.name = (id == 11 ? "長海|Nagaumi" : "駅" + id + "|Station " + id); topo.stations.add(x);
+		}
+		final Topology.Route r = new Topology.Route(); r.id = 5; r.name = "海線"; r.stationIds = new long[]{10, 11, 12}; topo.routes.add(r);
+		final Topology.Depot dp = new Topology.Depot(); dp.id = 1; dp.name = "海車庫"; dp.routeIds = new long[]{5}; topo.depots.add(dp);
+		st.setTopology(topo);
+		for (final DiaModel.Stop x : prof.stops) x.routeId = 5;
+		st.setSchedule(ScheduleSync.decode(ScheduleSync.encode(now, profs, dep, new SectionStats(), 900000)));
+		final ApiHandler api = new ApiHandler(st);
+		final String body = api.handle("/api/schedule/nagaumi", new HashMap<>()).body;
+		check(body.contains("\"kind\":\"planned\"") && body.contains("\"stationId\":\"11\"") && body.split("\"kind\"").length - 1 == 2, "駅の時刻表(英名で指定、2時間先まで): " + body.substring(0, Math.min(160, body.length())));
+		check(api.handle("/api/schedule/長海", new HashMap<>()).code == 200 && api.handle("/api/schedule/nowhere", new HashMap<>()).code == 404, "和名でも引ける / 無い駅は404");
+		final String rt = api.handle("/api/runtimes", new HashMap<>()).body;
+		check(rt.contains("\"runSec\":70") && rt.contains("\"dwellSec\":30"), "駅間の所要時間API");
+		check(api.handle("/api/stations", new HashMap<>()).body.contains("\"slug\":\"nagaumi\""), "駅一覧にURL用の呼び名");
 	}
+
+	// ------------------------------------------------------------------ カスタムダイヤ
+
+	static DiaModel.Stop stop(int path, long station, long platform, double arr, double dep) {
+		final DiaModel.Stop s = new DiaModel.Stop();
+		s.pathIndex = path; s.stationId = station; s.platformId = platform; s.arr = arr; s.dep = dep; s.station = "駅" + station;
+		return s;
+	}
+
+	static DiaModel.Profile profile(long depot, DiaModel.Stop... stops) {
+		final DiaModel.Profile p = new DiaModel.Profile();
+		p.depotId = depot; p.stops.addAll(Arrays.asList(stops));
+		return p;
+	}
+
+	static DiaModel.DepotPlan simplePlan(long depot, int first, int last, int headway) {
+		final DiaModel.DepotPlan p = new DiaModel.DepotPlan();
+		p.depotId = depot; p.first = first; p.last = last;
+		p.periods.add(new DiaModel.Period("終日", 0, 2 * 86400, headway));
+		return p;
+	}
+
+	static void diaTests() throws Exception {
+		System.out.println("[custom diagram]");
+		// 走行時間(MTRと同じ1tick刻み)
+		final DiaRunTime.Rail sd = new DiaRunTime.Rail(); sd.length = 40;
+		final DiaRunTime.Rail line = new DiaRunTime.Rail(); line.length = 1000; line.maxSpeed = 1.0F;
+		final DiaRunTime.Rail pf = new DiaRunTime.Rail(); pf.length = 40; pf.dwell = 20;
+		final DiaRunTime.Rail line2 = new DiaRunTime.Rail(); line2.length = 500; line2.maxSpeed = 1.0F;
+		final DiaRunTime.Rail pf2 = new DiaRunTime.Rail(); pf2.length = 40; pf2.dwell = 20;
+		final DiaRunTime.Result rt = DiaRunTime.compute(new DiaRunTime.Rail[]{sd, line, pf, line2, pf2}, 40, 2, 20, 0.01F, 0.3F);
+		check(rt.arriveTick[2] > 1000 && rt.arriveTick[2] < 1300 && rt.arriveTick[0] < 0 && rt.endTick[0] >= 0 && rt.endTick[1] < rt.arriveTick[2], "走行時間: 1000ブロックを最高72km/h・加速0.01で約1100tick: " + rt.arriveTick[2]);
+		check(rt.arriveTick[4] - rt.arriveTick[2] > 500 + 200 && rt.arriveTick[4] - rt.arriveTick[2] < 900, "走行時間: 停車(10秒=200tick)を含む次駅まで: " + (rt.arriveTick[4] - rt.arriveTick[2]));
+
+		// 基準駅の発車時刻(時間帯ごとの間隔・初電/終電)
+		final DiaModel.DepotPlan tp = new DiaModel.DepotPlan(); tp.depotId = 1; tp.first = 6 * 3600; tp.last = 8 * 3600 + 1800;
+		tp.periods.add(new DiaModel.Period("朝", 6 * 3600, 7 * 3600, 600));
+		tp.periods.add(new DiaModel.Period("ラッシュ", 7 * 3600, 9 * 3600, 300));
+		final DiaModel.Profile p1 = profile(1, stop(3, 100, 1000, 60, 70), stop(9, 101, 1010, 200, 210));
+		final DiaModel.Config cfg = new DiaModel.Config();
+		cfg.slackSec = 0; cfg.slackPct = 0;
+		cfg.plans.put(1L, tp);
+		DiaPlanner.Result pr = DiaPlanner.plan(cfg, List.of(1L), Map.of(1L, p1));
+		final List<DiaModel.Run> runs = pr.runs.get(1L);
+		check(runs != null && runs.size() == 6 + 19, "時間帯ごとの間隔で便を並べる(6時台10分毎・7時〜8:30は5分毎): " + (runs == null ? null : runs.size()));
+		check(runs.get(0).dep[0] == 21600 && runs.get(0).arr[1] == 21600 - 70 + 200 && runs.get(0).depotDep == 21600 - 70 - 30, "基準駅の発車から各駅時刻と出庫時刻(余裕30秒)を逆算");
+		check(runs.get(runs.size() - 1).dep[0] == 8 * 3600 + 1800, "終電の時刻が入る");
+		tp.cancelled.add(6 * 3600 + 600); tp.extra.add(6 * 3600 + 900); tp.holds.put(0, 30);
+		pr = DiaPlanner.plan(cfg, List.of(1L), Map.of(1L, p1));
+		final DiaModel.Run r2 = pr.runs.get(1L).get(1);
+		check(r2.dep[0] == 6 * 3600 + 900 && r2.arr[1] - r2.dep[0] == 130 && r2.hold[0] == 30, "追加便・取りやめ便・手動の停車延長: " + DiaModel.hms(r2.dep[0]) + " arr1=" + (r2.arr[1] - r2.dep[0]));
+		cfg.slackSec = 2; cfg.slackPct = 10;
+		pr = DiaPlanner.plan(cfg, List.of(1L), Map.of(1L, p1));
+		final DiaModel.Run r3 = pr.runs.get(1L).get(1);
+		check(r3.arr[1] - r3.dep[0] == 130 + 2 + 13, "余裕時分: 駅間ごとに2秒+走行時間の10%を足す: " + (r3.arr[1] - r3.dep[0]));
+		cfg.slackSec = 0; cfg.slackPct = 0;
+
+		// 自動の噛み合わせ: 同じホームを使う2つの車庫は重ならないようずらす
+		final DiaModel.Config mc = new DiaModel.Config(); mc.sep = 30; mc.slackSec = 0; mc.slackPct = 0;
+		mc.plans.put(1L, simplePlan(1, 6 * 3600, 7 * 3600, 300));
+		mc.plans.put(2L, simplePlan(2, 6 * 3600, 7 * 3600, 300));
+		final DiaModel.Profile a = profile(1, stop(1, 100, 1000, 0, 30), stop(2, 101, 1010, 120, 150));
+		final DiaModel.Profile b = profile(2, stop(1, 100, 1000, 0, 30), stop(2, 101, 1010, 120, 150));
+		pr = DiaPlanner.plan(mc, List.of(1L, 2L), Map.of(1L, a, 2L, b));
+		final int off = pr.offsets.get(2L) - pr.offsets.get(1L);
+		check(pr.warnings.isEmpty() && Math.abs(off) >= 120 && Math.abs(off) <= 180, "噛み合わせ: 同じ間隔の2系統は真ん中に入るようずれる: " + off + " " + pr.warnings);
+
+		// 待避: 各停(車庫1)は中間駅の副本線(1011)、急行(車庫2)は本線(1012)。急行が先に次駅へ着くなら各停が中間駅で待つ
+		final DiaModel.Config oc = new DiaModel.Config(); oc.sep = 30; oc.slackSec = 0; oc.slackPct = 0;
+		final DiaModel.DepotPlan lp = simplePlan(1, 6 * 3600, 6 * 3600, 600); lp.autoMesh = false;
+		final DiaModel.DepotPlan ep = simplePlan(2, 6 * 3600 + 60, 6 * 3600 + 60, 600); ep.autoMesh = false;
+		oc.plans.put(1L, lp); oc.plans.put(2L, ep);
+		final DiaModel.Profile local = profile(1, stop(1, 100, 1000, 0, 30), stop(2, 101, 1011, 200, 230), stop(3, 102, 1020, 400, 430));
+		final DiaModel.Profile exp = profile(2, stop(1, 100, 1000, 0, 30), stop(2, 101, 1012, 150, 170), stop(3, 102, 1020, 280, 310));
+		pr = DiaPlanner.plan(oc, List.of(1L, 2L), Map.of(1L, local, 2L, exp));
+		final DiaModel.Run lr = pr.runs.get(1L).get(0), er = pr.runs.get(2L).get(0);
+		check(lr.hold[1] > 0 && lr.arr[2] >= er.dep[2] + 30 && er.arr[1] >= lr.arr[1], "待避: 急行は駅間で各停を追い越さず、別ホームのある駅で各停が急行を待つ(各停の停車延長 " + lr.hold[1] + "秒)");
+		// 同じホームしかない駅では追い越さない(急行が後ろで待つ)
+		final DiaModel.Profile exp2 = profile(2, stop(1, 100, 1000, 0, 30), stop(2, 101, 1011, 150, 170), stop(3, 102, 1020, 280, 310));
+		pr = DiaPlanner.plan(oc, List.of(1L, 2L), Map.of(1L, local, 2L, exp2));
+		final DiaModel.Run lr2 = pr.runs.get(1L).get(0), er2 = pr.runs.get(2L).get(0);
+		check(er2.arr[1] >= lr2.dep[1] + 30 && er2.arr[2] >= lr2.dep[2] + 30, "同じ線路では追い越さない(急行が各停の後ろを走る)");
+
+		// 通過: 急行が各停の止まっている同じホームを通過するなら、急行が手前で待つ
+		final DiaModel.Profile expPass = profile(2, stop(1, 100, 1000, 0, 30), stop(5, 101, 1011, 150, 150), stop(9, 102, 1020, 260, 290));
+		expPass.stops.get(1).pass = true;
+		pr = DiaPlanner.plan(oc, List.of(1L, 2L), Map.of(1L, local, 2L, expPass));
+		final DiaModel.Run lr3 = pr.runs.get(1L).get(0), er3 = pr.runs.get(2L).get(0);
+		check(er3.arr[1] >= lr3.dep[1] + 30 && er3.hold[1] == 0 && er3.hold[0] > 0, "通過駅では待てないので、手前の停車駅で待たせる");
+		check(DiaCodec.decodeProfiles(DiaCodec.encodeProfiles(Map.of(2L, expPass))).get(2L).stops.get(1).pass, "通過の情報も同期する");
+
+		// 保存形式
+		final DiaModel.RouteSetting rs = new DiaModel.RouteSetting(); rs.routeId = 77; rs.custom = true; rs.overKmh = 15; rs.maxKmh = 130;
+		cfg.routes.put(77L, rs); cfg.rev = 4;
+		final DiaModel.Config back = DiaCodec.decodeConfig(DiaCodec.encodeConfig(cfg));
+		final DiaModel.DepotPlan bp = back.plans.get(1L);
+		check(back.rev == 4 && back.routes.get(77L).custom && back.routes.get(77L).maxKmh == 130 && bp.periods.size() == 2 && bp.extra.equals(tp.extra) && bp.holds.get(0) == 30, "設定の保存・読み込み");
+		final Map<Long, DiaModel.Profile> pb = DiaCodec.decodeProfiles(DiaCodec.encodeProfiles(Map.of(1L, p1)));
+		check(pb.get(1L).stops.size() == 2 && pb.get(1L).stops.get(1).platformId == 1010 && Math.abs(pb.get(1L).stops.get(1).arr - 200) < 0.01, "理想走行の同期形式");
+
+		// JSON(Webからの保存)
+		final DiaModel.Config jc = DiaJson.readConfig(JsonReader.parse("{\"sep\":45,\"routes\":[{\"routeId\":\"123\",\"custom\":true,\"safety\":1,\"overKmh\":10}],"
+				+ "\"plans\":[{\"depotId\":\"9\",\"first\":\"5:00\",\"last\":\"24:30\",\"periods\":[{\"name\":\"朝\",\"start\":\"5:00\",\"end\":\"9:00\",\"headway\":180}],\"extra\":[\"6:01:30\"],\"holds\":{\"2\":40}}]}"));
+		check(jc.sep == 45 && jc.routes.get(123L).safety == 1 && jc.plans.get(9L).last == 24 * 3600 + 1800 && jc.plans.get(9L).extra.get(0) == 6 * 3600 + 90 && jc.plans.get(9L).holds.get(2) == 40, "JSONの設定を読む(時刻は HH:MM[:SS] も可)");
+		boolean bad = false;
+		try { DiaJson.readConfig(JsonReader.parse("{\"plans\":[{\"depotId\":1,\"periods\":[{\"start\":0,\"end\":100,\"headway\":5}]}]}")); } catch (IllegalArgumentException e) { bad = true; }
+		check(bad, "範囲外の値(間隔5秒)は拒否");
+
+		// 実行時: 出庫で便を割り当て、発車時刻まで待たせる
+		final DiaRuntime rtm = new DiaRuntime();
+		final DiaModel.RouteSetting cr = new DiaModel.RouteSetting(); cr.routeId = 5; cr.custom = true;
+		cfg.routes.clear(); cfg.routes.put(5L, cr);
+		rtm.update(cfg, Map.of(1L, p1), Map.of(1L, List.of(5L), 2L, List.of(6L)));
+		check(rtm.isCustomDepot(1) && !rtm.isCustomDepot(2), "路線がカスタムの車庫だけカスタムダイヤで動かす");
+		final DiaModel.Run first = rtm.plan().runs.get(1L).get(0);
+		final DiaRuntime.Assign as = rtm.onDeploy(42L, 1L, first.depotDep + 5, 0);
+		check(as != null && as.no == 1 && rtm.departureOf(42L, rtm.stopOf(1L, 9)) == first.dep[1], "出庫時刻から便を割り当て、停車駅の発車時刻を引く");
+		check(rtm.onDeploy(43L, 1L, first.depotDep + 5, 0) == null || rtm.assignOf(43L).no != 1, "同じ便を2本に割り当てない");
+		rtm.onDepart(42L, 0, first.dep[0] + 25);
+		check(rtm.delayOf(42L) == 25, "発車時の遅れを記録");
+		check(DiaRuntime.adjustDwell(100, 200, 2400, 60) == 21F, "早着: ドアを開けたまま待つ");
+		check(DiaRuntime.adjustDwell(150, 200, 60, 60) == 140F, "早着: 発車時刻ちょうどに出発するよう経過を合わせる");
+		check(DiaRuntime.adjustDwell(150, 400, 200, 10) == 200F, "このままだと遅れる: 停車を詰めて発車時刻に合わせる");
+		check(DiaRuntime.adjustDwell(30, 200, 100, 60) == 30F, "早着でも経過がまだ少なければそのまま");
+		check(DiaRuntime.adjustDwell(150, 400, -100, 60) == 400 - 20 - 64, "遅れ: ドアが一定時間開いたらすぐ閉め始める");
+		check(DiaRuntime.adjustDwell(90, 400, -100, 60) == 90F, "遅れ: ドアが開いた直後はまだ閉めない");
+		final float line80 = 80 / 72F;
+		check(DiaRuntime.safetyLimit(DiaModel.SAFETY_ATC, 1000, 0.01F, line80) == line80, "ATC: 先が空いていれば線区の速度");
+		final float near = DiaRuntime.safetyLimit(DiaModel.SAFETY_ATC, 50, 0.01F, line80);
+		check(near < line80 && Math.abs(near - Math.sqrt(2 * 0.01 * (50 - DiaRuntime.STOP_MARGIN))) < 1e-4, "ATC: 先行列車の手前で止まれる速度に抑える");
+		check(DiaRuntime.safetyLimit(DiaModel.SAFETY_ATS, 50, 0.01F, line80) * 72 == 65F, "ATS: 段階の速度に丸める");
+		check(DiaRuntime.safetyLimit(DiaModel.SAFETY_OFF, 5, 0.01F, line80) == line80, "保安装置なしはMTR標準");
+		final DiaModel.RouteSetting rec = new DiaModel.RouteSetting(); rec.overKmh = 15; rec.maxKmh = 120; rec.delayThreshold = 10;
+		check(Math.abs(DiaRuntime.recoverySpeed(100 / 72F, rec, 30) * 72 - 115) < 1e-3 && Math.abs(DiaRuntime.recoverySpeed(110 / 72F, rec, 30) * 72 - 120) < 1e-3, "回復運転: レール速度+15km/h、上限120km/h");
+		check(DiaRuntime.recoverySpeed(100 / 72F, rec, 5) == 100 / 72F, "回復運転: しきい値未満の遅れでは使わない");
+	}
+
 
 	private static class Part0 {
 	}

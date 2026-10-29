@@ -18,6 +18,15 @@ public final class Geometry {
 		public double distance;
 		/** 折れ線の頂点 [x, y, z, x, y, z, ...](ブロック座標) */
 		public int[] points = new int[0];
+		/** 乗り物の種類(MTRの TransportMode を小文字に: train / boat / cable_car / airplane) */
+		public String mode = "";
+		/**
+		 * レールの種別ごとの区切り(区間の始点からの距離)。MTRの RailType そのまま(WOODEN〜DIAMOND, PLATFORM, SIDING, TURN_BACK, CABLE_CAR, RUNWAY など)。
+		 * 同じ種別が続くところは1つにまとめる。
+		 */
+		public String[] partTypes = new String[0];
+		public float[] partFrom = new float[0];
+		public float[] partTo = new float[0];
 
 		public int pointCount() {
 			return points.length / 3;

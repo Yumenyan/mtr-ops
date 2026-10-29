@@ -1,0 +1,2 @@
+package mtr.data;
+public class Depot extends AreaBase { public long lastDeployedMillis; public boolean useRealTime; public boolean repeatInfinitely; public int cruisingAltitude; public final java.util.List<Long> routeIds=null; public final java.util.List<Integer> departures=null; public final java.util.List<Integer> tempDepartures=null; public static final int MILLISECONDS_PER_DAY = 86400000; public int getFrequency(int i){return 0;} public void generateTempDepartures(net.minecraft.world.level.Level w){} }

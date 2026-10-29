@@ -1,0 +1,2 @@
+package mtr.data;
+public class TrainServer extends Train { public boolean simulateTrain(net.minecraft.world.level.Level world, float ticksElapsed, Depot depot, DataCache dataCache, java.util.List<java.util.Map<java.util.UUID, Long>> trainPositions, java.util.Map<net.minecraft.world.entity.player.Player, java.util.Set<TrainServer>> trainsInPlayerRange, java.util.Map<Long, java.util.List<ScheduleEntry>> schedulesForPlatform, java.util.Map<Long, java.util.Map<net.minecraft.core.BlockPos, Object>> trainDelays){return false;} }
