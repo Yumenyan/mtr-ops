@@ -690,6 +690,21 @@ public class CoreSelfTest {
 		final int minDwell = 3 * 20 + EtaPlanner.DOOR_TICKS;
 		check(e.etaTicks[1] == 40 * 20 + minDwell + 70 * 20 && e.etaSchedTicks[1] == 150 * 20, "遅れているときは最短の停車で出る: " + Arrays.toString(e.etaTicks));
 
+		// 自動調整: 走行時間の実績で理想走行を伸ばす(停車時間は伸ばさない・観測が少ない区間は伸ばさない・0.05刻み)
+		final SectionStats rs = new SectionStats();
+		for (int i = 0; i < 3; i++) rs.add(10, 11, 84, 70, 0);   // 比率1.2
+		rs.add(11, 12, 100, 70, 0);                               // 観測1回だけ
+		final Map<String, Double> ratios = DiaStretch.ratios(rs);
+		check(ratios.size() == 1 && Math.abs(ratios.get(SectionStats.key(10, 11)) - 1.2) < 1e-9, "比率は観測3回以上の区間だけ、0.05刻み: " + ratios);
+		final DiaModel.Profile sp = DiaStretch.apply(prof, ratios);
+		check(Math.abs(sp.stops.get(1).arr - (30 + 70 * 1.2)) < 1e-6 && Math.abs((sp.stops.get(1).dep - sp.stops.get(1).arr) - 30) < 1e-6 && Math.abs(sp.stops.get(2).arr - (prof.stops.get(2).arr + 14)) < 1e-6, "走行時間だけ伸ばし、停車時間と以降の時刻は後ろへずらす: " + sp.stops.get(1).arr);
+		check(DiaStretch.apply(prof, new HashMap<>()) == prof || DiaStretch.apply(Map.of(1L, prof), new HashMap<>()).get(1L) == prof, "比率が無ければそのまま");
+
+		// 前の列車に追いついたとき、最低限の間隔をあけて待つ
+		final DiaRuntime gr = new DiaRuntime();
+		gr.recordDeparture(500, 10_000);
+		check(gr.gapRemainingTicks(500, 60, 10_000 + 20_000) == (int) (40_000 / 50) && gr.gapRemainingTicks(500, 60, 10_000 + 70_000) == 0 && gr.gapRemainingTicks(999, 60, 10_000) == 0, "同じホームの前の列車の発車から一定間隔をあける");
+
 		// 時刻表API用の同期と、駅の時刻表
 		final Map<Long, DiaModel.Profile> profs = new LinkedHashMap<>();
 		profs.put(1L, prof);

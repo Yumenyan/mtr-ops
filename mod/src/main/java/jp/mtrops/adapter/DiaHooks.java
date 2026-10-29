@@ -41,6 +41,9 @@ public final class DiaHooks {
 	/** ATC/ATS のパターンに使う減速度(列車の加減速度に対する割合)。常用ブレーキ相当で早めに減速し始める */
 	private static final float ATC_DECEL = 0.6F;
 
+	/** 速度・停車を変えた列車をクライアントへ同期する間隔(tick)。長いと、クライアントの予測との差が溜まって巻き戻りに見える */
+	private static final int SYNC_TICKS = 4;
+
 	private static volatile Context context;
 	/** フックが一度でも呼ばれたか(ミックスインが効いているかの確認用) */
 	public static volatile boolean speedHookSeen;
@@ -49,6 +52,7 @@ public final class DiaHooks {
 	private static final class State {
 		boolean onRoute;
 		int stoppedAt = -1;
+		long stoppedPlatform;
 		boolean adjusted;
 		boolean limited;
 		long lastSync;
@@ -222,7 +226,9 @@ public final class DiaHooks {
 			if (target != Integer.MIN_VALUE) {
 				double diff = target - now;
 				diff = ((diff % DiaModel.DAY) + DiaModel.DAY + DiaModel.DAY / 2.0) % DiaModel.DAY - DiaModel.DAY / 2.0;
-				final int remaining = (int) Math.round(diff * 20);
+				int remaining = (int) Math.round(diff * 20);
+				// 前の列車が出てから最低限の間隔(同じホームの最小間隔 + 20秒)をあける。遅れて追いついても詰まらないように自動で待たせる
+				remaining = Math.max(remaining, rt.gapRemainingTicks(pd.savedRailBaseId, rt.config().sep + 20, millis));
 				final float e = MtrFields.elapsedDwellTicks(t);
 				final float ne = DiaRuntime.adjustDwell(e, pd.dwellTime * 10, remaining, c.minOpenTicks());
 				if (Math.abs(ne - e) > 1e-3F) {
@@ -231,8 +237,10 @@ public final class DiaHooks {
 				}
 			}
 			st.stoppedAt = stop;
+			st.stoppedPlatform = pd.savedRailBaseId;
 		} else if (!stopped && st.stoppedAt >= 0) {
 			rt.onDepart(t.id, st.stoppedAt, (int) Math.floor(now));
+			rt.recordDeparture(st.stoppedPlatform, millis);
 			st.stoppedAt = -1;
 		}
 		if (tick % 20 == t.id % 20) {
@@ -257,7 +265,7 @@ public final class DiaHooks {
 				return false;
 			}
 			final long tick = c.currentTick();
-			if (tick - st.lastSync >= 10) {
+			if (tick - st.lastSync >= SYNC_TICKS) {
 				st.lastSync = tick;
 				return true;
 			}

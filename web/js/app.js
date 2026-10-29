@@ -104,7 +104,10 @@
   }
 
   // ---------- 路線のまとめ: 同じ路線名(括弧書きを除く)・同じナンバリング記号の路線は1本の「ライン」に自動でマージする ----------
-  const baseName = r => jp(r.name).replace(/[(（][^)）]*[)）]/g, '').replace(/\s+/g, ' ').trim() || jp(r.name) || String(r.id);
+  // 路線名: | は取り除かず空白に置き換える(| の後ろに上り・下りなどが入るため)。括弧書きだけ除く
+  const rn = n => clean((n || '').replace(/\|/g, ' '));   // 路線名の表示(| を空白に)
+  const fullName = r => clean((r.name || '').replace(/\|/g, ' '));
+  const baseName = r => fullName(r).replace(/[(（][^)）]*[)）]/g, '').replace(/\s+/g, ' ').trim() || fullName(r) || String(r.id);
   const nameKey = r => baseName(r).replace(/\s+/g, '').toLowerCase();
   function buildGroups() {
     const parent = new Map(S.routes.map(r => [String(r.id), String(r.id)]));
@@ -466,19 +469,19 @@
       const body = [];
       for (const sd of d.sidings || []) {
         const fs = (sd.formations || []).filter(f => match(f.id, f.series, jp(d.name), jp(sd.name), sd.typeName));
-        const un = (sd.unassigned || []).filter(u => match('未割当', u.label, u.series, jp(d.name), jp(sd.name), jp(u.routeName)));
+        const un = (sd.unassigned || []).filter(u => match('未割当', u.label, u.series, jp(d.name), jp(sd.name), rn(u.routeName)));
         if (!fs.length && !un.length && q) continue;
         const cards = [];
         for (const f of fs) {
           const live = f.state === 'service' && f.trainId; const k = f.status || 'normal';
           cards.push(h('button', { class: `fm ${live ? 'live' : 'dep'}`, type: 'button', style: `--sc:var(--${colOf(k)})`, onclick: () => live && go('fleet', '', f.trainId) },
             h('b', null, f.title || f.id), `${f.series || sd.typeName || '形式不明'} ${f.cars ? f.cars + '両' : ''}`, h('br'),
-            live ? h('span', { class: `s-${k}` }, `${st(k).mark} ${jp(f.routeName) || '運行中'}`) : h('span', { class: 'nodata' }, '車庫')));
+            live ? h('span', { class: `s-${k}` }, `${st(k).mark} ${rn(f.routeName) || '運行中'}`) : h('span', { class: 'nodata' }, '車庫')));
         }
         for (const u of un) {
           cards.push(h('button', { class: 'fm live un', type: 'button', style: `--sc:var(--${colOf(u.status)})`, onclick: () => go('fleet', '', u.trainId) },
             h('b', null, '番号未設定'), `${u.series || sd.typeName || '形式不明'} ${u.cars}両`, h('br'),
-            h('span', { class: `s-${u.status}` }, `${st(u.status).mark} ${jp(u.routeName) || '運行中'}`)));
+            h('span', { class: `s-${u.status}` }, `${st(u.status).mark} ${rn(u.routeName) || '運行中'}`)));
         }
         body.push(h('div', { class: 'siding' },
           h('h4', null, `${jp(sd.name)}`, sd.typeName ? ` ・ ${sd.typeName}` : '', ` ・ 登録 ${sd.registered}編成`, sd.range ? ` ・ 車番 ${sd.range.text}` : ' ・ 車番範囲 未設定'),
@@ -507,7 +510,7 @@
       g.reasons.map(x => h('div', { class: 'greason' }, h('b', null, x.label), h('span', null, x.detail))),
       h('dl', { class: 'gmeta' },
         h('dt', null, '車庫'), h('dd', null, `${jp(g.depotName) || '不明'} / ${jp(g.sidingName) || '不明'}`),
-        h('dt', null, '路線'), h('dd', null, r ? jp(r.name) : (g.routeName ? jp(g.routeName) : '行先なし(路線を特定できません)')),
+        h('dt', null, '路線'), h('dd', null, r ? rn(r.name) : (g.routeName ? rn(g.routeName) : '行先なし(路線を特定できません)')),
         h('dt', null, '状態'), h('dd', null, `${g.onRoute ? '運行中' : '車庫待機'} ・ 速度 ${g.speedKmh} km/h`),
         h('dt', null, '座標'), h('dd', null, `X ${Math.round(g.x)} / Y ${Math.round(g.y)} / Z ${Math.round(g.z)}`)),
       h('div', { class: 'gact' }, btnTp, btnId));
@@ -622,7 +625,7 @@
         if (e.routeId !== curRoute) {
           curRoute = e.routeId; const rr = route(e.routeId) || { color: '#888', name: e.routeName || '', stationIds: [] };
           const lastId = (rr.stationIds || [])[(rr.stationIds || []).length - 1]; const dest = station(lastId);
-          box.append(h('div', { class: 'after-h', style: `--c:${rr.color}` }, h('span', { class: 'lsym sm', style: `--c:${rr.color}` }), h('b', null, '折り返し後'), ` ${jp(rr.name)}`, dest ? ` ・ ${jp(dest.name)}行き` : ''));
+          box.append(h('div', { class: 'after-h', style: `--c:${rr.color}` }, h('span', { class: 'lsym sm', style: `--c:${rr.color}` }), h('b', null, '折り返し後'), ` ${rn(rr.name)}`, dest ? ` ・ ${jp(dest.name)}行き` : ''));
           list = h('div', { class: 'tlist', style: `--c:${rr.color}` }); box.append(list);
         }
         const s0 = station(e.stationId) || { name: e.station || '' };
@@ -634,7 +637,7 @@
     const isDia = S.dia.routes.has(String(t.routeId));
     const dl = [['編成番号', t.title || t.formation || '番号未設定'], ['車両', t.typeName || t.series], t.typeName && t.series && t.series !== t.typeName ? ['系列', t.series] : null,
       ['両数', t.cars ? `${t.cars}両` : null], ['速度', t.speedKmh != null ? `${Math.round(t.speedKmh)} km/h` : null], ['乗客', t.passengers != null ? `${t.passengers}人` : null],
-      ['車庫', t.depotName && `${jp(t.depotName)} ${t.sidingName || ''}`], ['路線', jp(r.name)]].filter(x => x && x[1] != null && x[1] !== '');
+      ['車庫', t.depotName && `${jp(t.depotName)} ${t.sidingName || ''}`], ['路線', rn(r.name)]].filter(x => x && x[1] != null && x[1] !== '');
     const first = station((r.stationIds || [])[0]);
     return modalFrame('列車詳細情報', [
       h('div', { class: 'hero' },
@@ -670,7 +673,7 @@
     const d = cached && cached.data;
     const pick = g.members.length > 1 ? h('div', { class: 'sel-route' }, h('span', { class: 'nodata' }, '系統'),
       h('select', { 'aria-label': '系統', onchange: e => { S.distSel = e.target.value; render(true); } },
-        g.members.map(m => h('option', Object.assign({ value: String(m.id) }, String(m.id) === S.distSel ? { selected: true } : {}), `${jp(m.name)}(${(m.stationIds || []).length}駅)`)))) : null;
+        g.members.map(m => h('option', Object.assign({ value: String(m.id) }, String(m.id) === S.distSel ? { selected: true } : {}), `${rn(m.name)}(${(m.stationIds || []).length}駅)`)))) : null;
     let body;
     if (!d) body = h('div', { class: 'empty' }, '読み込み中…');
     else if (!d.stations || d.stations.length < 2) body = h('div', { class: 'empty' }, 'この系統の駅の並びが取得できていません');
@@ -705,7 +708,7 @@
         return h('tr', { class: x.kind === 'live' ? 'live' : '' },
           h('td', { class: 'tt-time' }, late ? [h('span', { class: 'sch' }, hm(x.scheduled)), h('span', { class: 'arw' }, ' ▶ '), h('b', { class: 'late' }, hm(x.arrival))] : h('b', null, hm(x.terminating ? x.arrival : x.departure))),
           h('td', null, h('span', { class: 'lsym sm', style: `--c:${rr.color}` })),
-          h('td', { class: 'tt-dest' }, h('b', null, x.terminating ? '当駅止まり' : `${jp(x.destination) || '—'}行き`), h('small', null, jp(rr.name))),
+          h('td', { class: 'tt-dest' }, h('b', null, x.terminating ? '当駅止まり' : `${jp(x.destination) || '—'}行き`), h('small', null, rn(rr.name))),
           h('td', null, x.platform ? `${x.platform}番線` : ''),
           h('td', null, x.custom ? h('span', { class: 'diatag' }, 'ダイヤ') : null, x.kind === 'live' ? h('span', { class: 'livetag' }, '走行中') : h('span', { class: 'plantag' }, '予定')),
           h('td', { class: 'tt-in' }, min < 1 ? 'まもなく' : `${min}分後`, x.title || x.formation ? h('small', null, x.title || x.formation) : null));

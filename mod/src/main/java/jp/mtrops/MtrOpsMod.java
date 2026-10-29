@@ -15,7 +15,7 @@ import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 /** 共通(サーバー)エントリポイント。専用サーバーでもクライアント(統合サーバー)でも動く。 */
 public final class MtrOpsMod implements ModInitializer {
 
-	/** ダイヤ式鉄道ダッシュボード(MTRの鉄道ダッシュボードの亜種。カスタムダイヤの設定はすべてこの中で行う) */
+	/** ダイヤ編成ツール(MTRの鉄道ダッシュボードの亜種。カスタムダイヤの設定はすべてこの中で行う) */
 	public static final Item DIA_DASHBOARD = new DiaDashboardItem(new Item.Properties().stacksTo(1).tab(CreativeModeTab.TAB_TRANSPORTATION));
 
 	@Override
@@ -48,14 +48,23 @@ public final class MtrOpsMod implements ModInitializer {
 			});
 		});
 
-		// カスタムダイヤの設定(圧縮済み。ダイヤ式鉄道ダッシュボードから)
+		// カスタムダイヤの設定(圧縮済み。ダイヤ編成ツールから)
 		ServerPlayNetworking.registerGlobalReceiver(Net.DIA_UPDATE, (server, player, handler, buf, responseSender) -> {
-			final int baseRev = buf.readInt();
-			final byte[] payload = buf.readByteArray(32_000);
+			// ネットワークスレッドで例外を出すと接続が切れるので、読み取りの失敗は握りつぶして拒否の返事にする
+			int rev = -1;
+			byte[] data = null;
+			try {
+				rev = buf.readInt();
+				data = buf.readByteArray(32_000);
+			} catch (RuntimeException e) {
+				data = null;
+			}
+			final int baseRev = rev;
+			final byte[] payload = data;
 			server.execute(() -> {
 				final OpsServer ops = OpsServer.get();
 				if (ops != null) {
-					ops.handleDiaUpdate(player, baseRev, payload);
+					ops.handleDiaUpdate(player, baseRev, payload == null ? new byte[0] : payload);
 				}
 			});
 		});

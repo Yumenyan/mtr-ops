@@ -25,6 +25,8 @@ public final class OpsSavedData extends SavedData {
 	public jp.mtrops.core.DiaModel.Config dia = new jp.mtrops.core.DiaModel.Config();
 	/** 駅間の所要時間の実績(到着予想・時刻表の補正に使う) */
 	public jp.mtrops.core.SectionStats sections = new jp.mtrops.core.SectionStats();
+	/** 駅間の走行時間(停車を除く)の実績。カスタムダイヤの所要時間の自動補正に使う */
+	public jp.mtrops.core.SectionStats runs = new jp.mtrops.core.SectionStats();
 	/** 読み込みに失敗した元データ。編集されるまでそのまま書き戻して、台帳を失わないようにする。 */
 	private byte[] unreadable;
 
@@ -45,6 +47,9 @@ public final class OpsSavedData extends SavedData {
 			if (tag.contains("dia")) {
 				data.dia = jp.mtrops.core.DiaCodec.decodeConfig(tag.getByteArray("dia"));
 			}
+			if (tag.contains("runs")) {
+				data.runs = jp.mtrops.core.SectionStats.read(new java.io.DataInputStream(new java.io.ByteArrayInputStream(tag.getByteArray("runs"))));
+			}
 			if (tag.contains("sections")) {
 				data.sections = jp.mtrops.core.SectionStats.read(new java.io.DataInputStream(new java.io.ByteArrayInputStream(tag.getByteArray("sections"))));
 			}
@@ -64,6 +69,11 @@ public final class OpsSavedData extends SavedData {
 			sections.write(out);
 			out.flush();
 			tag.putByteArray("sections", bos.toByteArray());
+			final java.io.ByteArrayOutputStream bos2 = new java.io.ByteArrayOutputStream();
+			final java.io.DataOutputStream out2 = new java.io.DataOutputStream(bos2);
+			runs.write(out2);
+			out2.flush();
+			tag.putByteArray("runs", bos2.toByteArray());
 		} catch (IOException e) {
 			LOGGER.warn("駅間の所要時間の実績を保存できませんでした: {}", e.toString());
 		}

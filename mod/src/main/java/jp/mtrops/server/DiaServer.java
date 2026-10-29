@@ -49,6 +49,8 @@ public final class DiaServer implements DiaHooks.Context {
 	private byte[] syncBytes;
 	private long tick;
 	private boolean warnedHooks;
+	private java.util.Map<String, Double> stretchRatios;
+	private long stretchAt;
 
 	public DiaServer(MinecraftServer server, OpsConfig cfg, OpsSavedData saved) {
 		this.server = server;
@@ -114,7 +116,15 @@ public final class DiaServer implements DiaHooks.Context {
 			}
 		}
 		Collections.sort(custom);
-		final Map<Long, DiaModel.Profile> profs = DiaAdapter.buildProfiles(server, custom);
+		// 走行時間の実績で伸ばした理想走行(自動調整)。比率は数分おきにだけ更新する(時刻表が頻繁に作り直されないように)
+		if (stretchRatios == null || tick - stretchAt > 3000) {
+			stretchAt = tick;
+			final java.util.Map<String, Double> r = jp.mtrops.core.DiaStretch.ratios(saved.runs);
+			if (!r.equals(stretchRatios)) {
+				stretchRatios = r;
+			}
+		}
+		final Map<Long, DiaModel.Profile> profs = jp.mtrops.core.DiaStretch.apply(DiaAdapter.buildProfiles(server, custom), stretchRatios);
 		final byte[] profBytes = DiaCodec.encodeProfiles(profs);
 		final int hash = Arrays.hashCode(profBytes) * 31 + Arrays.hashCode(DiaCodec.encodeConfig(c)) * 17 + depotRoutes.hashCode();
 		if (!force && hash == stateHash) {
@@ -186,7 +196,12 @@ public final class DiaServer implements DiaHooks.Context {
 		incoming.rev = cur.rev + 1;
 		saved.dia = incoming;
 		saved.setDirty();
-		refresh(true);
+		try {
+			refresh(true);
+		} catch (RuntimeException e) {
+			LOGGER.error("ダイヤの反映に失敗しました: {}", e.toString(), e);
+			return "サーバーでダイヤを反映できませんでした(ログを確認してください)";
+		}
 		return null;
 	}
 

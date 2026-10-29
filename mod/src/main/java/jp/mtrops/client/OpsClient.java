@@ -137,7 +137,7 @@ public final class OpsClient {
 				LOGGER.warn("時刻表データの受信に失敗: {}", e.toString());
 			}
 		});
-		// ダイヤ式鉄道ダッシュボード(アイテム)を使った → 画面を開く(ネットワークスレッドから届くので次のtickで開く)
+		// ダイヤ編成ツール(アイテム)を使った → 画面を開く(ネットワークスレッドから届くので次のtickで開く)
 		ClientPlayNetworking.registerGlobalReceiver(Net.OPEN_DIA, (client, handler, buf, sender) -> {
 			final boolean canEdit = buf.readBoolean();
 			client.execute(() -> {
@@ -208,7 +208,7 @@ public final class OpsClient {
 							return Command.SINGLE_SUCCESS;
 						}))
 						.then(ClientCommandManager.literal("dia").executes(ctx -> {
-							// 閲覧用(保存はサーバーで権限を確認する)。アイテム「ダイヤ式鉄道ダッシュボード」からも開ける
+							// 閲覧用(保存はサーバーで権限を確認する)。アイテム「ダイヤ編成ツール」からも開ける
 							openDiaRequested = true;
 							return Command.SINGLE_SUCCESS;
 						}))
