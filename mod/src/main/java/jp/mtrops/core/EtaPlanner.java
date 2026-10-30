@@ -26,11 +26,27 @@ public final class EtaPlanner {
 			s.etaSchedTicks = new int[n];
 			java.util.Arrays.fill(s.etaSchedTicks, TrainSample.NO_SCHED);
 		}
+		if (s.etaPass.length != n) {
+			s.etaPass = new boolean[n];
+		}
 		long prevSt = lastStationId;
 		double prevIdeal = 0;
 		double prevExp = 0;
 		for (int k = 0; k < n; k++) {
 			final double d = Math.max(0, s.etaIdealTicks[k] - prevIdeal);
+			if (s.etaPass[k]) {
+				// 通過するホーム: 次に停車する駅までの区間の比率で伸ばす。停車駅の基準(prevSt など)は進めない
+				long next = 0;
+				for (int j = k + 1; j < n; j++) {
+					if (!s.etaPass[j]) {
+						next = s.etaStationIds[j];
+						break;
+					}
+				}
+				final double r = prevSt == 0 || next == 0 || stats == null ? 1 : stats.ratio(prevSt, next);
+				s.etaTicks[k] = (int) Math.min(Integer.MAX_VALUE, Math.round(prevExp + d * r));
+				continue;
+			}
 			final double r = prevSt == 0 || stats == null ? 1 : stats.ratio(prevSt, s.etaStationIds[k]);
 			final double exp = prevExp + d * r;
 			s.etaTicks[k] = (int) Math.min(Integer.MAX_VALUE, Math.round(exp));
@@ -59,6 +75,9 @@ public final class EtaPlanner {
 		java.util.Arrays.fill(stopOf, -1);
 		int p = Math.max(0, Math.max(lastStop, currentStop) + 1);
 		for (int k = 0; k < n; k++) {
+			if (k < s.etaPass.length && s.etaPass[k]) {
+				continue; // 通過は時刻表の停車駅に数えない
+			}
 			int q = p;
 			while (q < prof.stops.size() && (prof.stops.get(q).pass || prof.stops.get(q).platformId != s.etaPlatformIds[k])) {
 				q++;

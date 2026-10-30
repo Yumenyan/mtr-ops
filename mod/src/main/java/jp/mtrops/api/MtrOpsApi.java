@@ -31,6 +31,9 @@ import java.util.Map;
  *   Api.entryNumber(e)    編成番号                      Api.entryTypeId(e)  車両ID(mtr_custom_resources.json の id)
  *   Api.entryTypeName(e)  車両名(同 name)               Api.entryTrainId(e) 列車ID(文字列)
  *   Api.entryExpectedMillis(e) 到着見込み(UNIXミリ秒、mtrops の補正済み)
+ * そのホームを停車せず通過する列車(ScheduleEntry には出ない)は、ホームIDで引く:
+ *   const n = Api.passCount(platformId, 600);              // 10分以内に通過する列車の数
+ *   Api.passMillis(platformId, i) / passInSec / passDelaySec / passNumber / passTypeId / passTypeName / passRouteId / passTrainId(i = 0 が一番早い)
  * どれも第2引数にホームIDを渡せる(例 Api.entryNumber(e, platformId))。省略するとMTRの到着予定一覧から探す。
  * ScheduleEntry は列車IDを持たないため、そのホームへの到着予想が早い順に列車を並べ、
  * 同じホーム・路線のエントリを到着時刻順に並べたときの順位で対応づける。該当する列車が無いときは空文字/0。
@@ -148,7 +151,7 @@ public final class MtrOpsApi {
 					continue;
 				}
 				for (final EtaCodec.Entry e : OpsClient.STORE.etasOf(v.s.id)) {
-					if (e.platformId == d.platformId && (e.routeId == 0 || e.routeId == d.routeId)) {
+					if (!e.pass && e.platformId == d.platformId && (e.routeId == 0 || e.routeId == d.routeId)) {
 						cands.add(new Cand(v, e.ticks));
 						break;
 					}
@@ -167,7 +170,7 @@ public final class MtrOpsApi {
 
 	private static boolean hasRouteAt(long trainId, long platformId, long routeId) {
 		for (final EtaCodec.Entry e : OpsClient.STORE.etasOf(trainId)) {
-			if (e.platformId == platformId && e.routeId == routeId) {
+			if (!e.pass && e.platformId == platformId && e.routeId == routeId) {
 				return true;
 			}
 		}
@@ -192,7 +195,7 @@ public final class MtrOpsApi {
 
 	private static EtaCodec.Entry etaOf(TrainView v, MtrClientAdapter.EntryData d) {
 		for (final EtaCodec.Entry e : OpsClient.STORE.etasOf(v.s.id)) {
-			if (e.platformId == d.platformId) {
+			if (!e.pass && e.platformId == d.platformId) {
 				return e;
 			}
 		}
@@ -290,6 +293,107 @@ public final class MtrOpsApi {
 			return d.arrivalMillis == Long.MIN_VALUE ? 0 : d.arrivalMillis;
 		}
 		return OpsClient.STORE.etas().receivedMillis + e.ticks * 50.0;
+	}
+
+	// ------------------------------------------------------------------ そのホームを通過する列車(停車しないので ScheduleEntry には出ない)
+
+	private static final class PassItem {
+		final TrainView train;
+		final EtaCodec.Entry eta;
+		final long millis;
+
+		PassItem(TrainView train, EtaCodec.Entry eta, long millis) {
+			this.train = train;
+			this.eta = eta;
+			this.millis = millis;
+		}
+	}
+
+	/** そのホームを通過する列車(今から horizonSec 秒以内)を、通過時刻の早い順に。 */
+	private static List<PassItem> passItems(Object platformId, double horizonSec) {
+		final List<PassItem> out = new ArrayList<>();
+		try {
+			final long pf = platformArg(platformId);
+			final Snapshot snap = OpsClient.STORE.live();
+			if (snap == null || pf <= 0) {
+				return out;
+			}
+			final long base = OpsClient.STORE.etas().receivedMillis;
+			final long limit = System.currentTimeMillis() + (long) (horizonSec * 1000);
+			for (final TrainView v : snap.trains) {
+				if (!v.s.onRoute) {
+					continue;
+				}
+				for (final EtaCodec.Entry e : OpsClient.STORE.etasOf(v.s.id)) {
+					final long t = base + e.ticks * 50L;
+					if (e.pass && e.platformId == pf && t <= limit) {
+						out.add(new PassItem(v, e, t));
+						break;
+					}
+				}
+			}
+			out.sort(Comparator.comparingLong(p -> p.millis));
+		} catch (RuntimeException ignored) {
+		}
+		return out;
+	}
+
+	private static PassItem passAt(Object platformId, int index) {
+		final List<PassItem> l = passItems(platformId, 7200);
+		return index >= 0 && index < l.size() ? l.get(index) : null;
+	}
+
+	/** そのホームを今から horizonSec 秒以内に通過する列車の数。 */
+	public static int passCount(Object platformId, double horizonSec) {
+		return passItems(platformId, horizonSec).size();
+	}
+
+	/** index 番目(0始まり、通過が早い順)の通過時刻(UNIXミリ秒。mtrops の補正済み)。無ければ 0。 */
+	public static double passMillis(Object platformId, int index) {
+		final PassItem p = passAt(platformId, index);
+		return p == null ? 0 : p.millis;
+	}
+
+	/** 通過までの残り(秒)。無ければ -1。 */
+	public static int passInSec(Object platformId, int index) {
+		final PassItem p = passAt(platformId, index);
+		return p == null ? -1 : (int) Math.max(0, (p.millis - System.currentTimeMillis()) / 1000);
+	}
+
+	/** 遅れ(秒)。 */
+	public static int passDelaySec(Object platformId, int index) {
+		final PassItem p = passAt(platformId, index);
+		return p == null ? 0 : Math.max(0, p.train.delaySec);
+	}
+
+	/** 編成番号。 */
+	public static String passNumber(Object platformId, int index) {
+		final PassItem p = passAt(platformId, index);
+		return p == null || p.train.s.formationId == null ? "" : p.train.s.formationId;
+	}
+
+	/** 車両ID(mtr_custom_resources.json の id)。 */
+	public static String passTypeId(Object platformId, int index) {
+		final PassItem p = passAt(platformId, index);
+		return p == null || p.train.s.trainType == null ? "" : p.train.s.trainType;
+	}
+
+	/** 車両名(mtr_custom_resources.json の name)。 */
+	public static String passTypeName(Object platformId, int index) {
+		final String id = passTypeId(platformId, index);
+		return id.isEmpty() ? "" : MtrClientAdapter.typeName(id);
+	}
+
+	/** 通過する列車の路線ID(文字列)。 */
+	public static String passRouteId(Object platformId, int index) {
+		final PassItem p = passAt(platformId, index);
+		return p == null ? "" : Long.toString(p.eta.routeId != 0 ? p.eta.routeId : p.train.s.routeId);
+	}
+
+	/** 列車ID(文字列)。 */
+	public static String passTrainId(Object platformId, int index) {
+		final PassItem p = passAt(platformId, index);
+		return p == null ? "" : Long.toString(p.train.s.id);
 	}
 
 	private static TrainView find(Object trainId) {

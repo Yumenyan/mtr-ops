@@ -114,6 +114,10 @@ public final class OpsServer {
 		/** その駅に着いた時点での、次の停車駅とMTRの理論上の所要時間(tick) */
 		long nextStation;
 		double nextIdeal = Double.NaN;
+		/** 駅を出た時刻(tick)と、そのときのMTRの理論上の次駅までの走行(tick)。出ていなければ 0 */
+		long departTick;
+		long runStation;
+		double runIdeal;
 	}
 
 	private final java.util.Map<Long, StopTrack> stopTracks = new java.util.HashMap<>();
@@ -168,14 +172,28 @@ public final class OpsServer {
 		}
 		if (adapterOk) {
 			sendDia(player, dia.syncBytes());
-			if (scheduleBytes != null) {
+			if (scheduleBytes == null) {
+				try {
+					refreshSchedule();
+				} catch (RuntimeException | LinkageError e) {
+					LOGGER.warn("時刻表データの作成に失敗: {}", e.toString());
+				}
+			} else {
 				send(player, Net.SCHEDULE, scheduleBytes);
 			}
 		}
 	}
 
-	/** ダイヤ式鉄道ダッシュボードを使った。最新のダイヤを送ってから画面を開かせる(編集できるかも伝える。保存時にもサーバーで確認する)。 */
+	/** ダイヤ編成ツールを使った。最新のダイヤを送ってから画面を開かせる(編集できるかも伝える。保存時にもサーバーで確認する)。 */
 	public void openDiaDashboard(ServerPlayer player) {
+		try {
+			openDiaDashboardInner(player);
+		} catch (RuntimeException | LinkageError e) {
+			LOGGER.error("ダイヤ編成ツールを開けませんでした: {}", e.toString(), e);
+		}
+	}
+
+	private void openDiaDashboardInner(ServerPlayer player) {
 		if (!adapterOk) {
 			player.displayClientMessage(net.minecraft.network.chat.Component.literal("mtrops: MTR の列車情報にアクセスできないため、ダイヤは使えません"), false);
 			return;
@@ -312,6 +330,10 @@ public final class OpsServer {
 			StopTrack tr = stopTracks.get(s.id);
 			if (s.atStop && s.curStationId != 0) {
 				final long arriveTick = tickCount - (long) s.elapsedDwellTicks;
+				if (tr != null && tr.station != s.curStationId && tr.departTick > 0 && tr.runStation == s.curStationId && tr.runIdeal > 0) {
+					// 走行時間(停車を除く)の実績。カスタムダイヤの列車も含める(待たされる時間を含まないので)
+					saved.runs.add(tr.station, s.curStationId, (arriveTick - tr.departTick) / 20.0, tr.runIdeal / 20.0, nowMillis);
+				}
 				if (tr == null || tr.station != s.curStationId) {
 					// 新しい駅に着いた: 前の駅からの実績を記録(カスタムダイヤの列車は時刻調整で待つので記録しない)
 					if (tr != null && !custom && tr.nextStation == s.curStationId && !Double.isNaN(tr.nextIdeal)) {
@@ -322,9 +344,26 @@ public final class OpsServer {
 					tr.arriveTick = arriveTick;
 					stopTracks.put(s.id, tr);
 				}
-				if (Double.isNaN(tr.nextIdeal) && s.etaStationIds.length > 0) {
-					tr.nextStation = s.etaStationIds[0];
-					tr.nextIdeal = s.etaIdealTicks[0] + s.elapsedDwellTicks;
+				if (Double.isNaN(tr.nextIdeal)) {
+					for (int k = 0; k < s.etaStationIds.length; k++) {
+						if (k < s.etaPass.length && s.etaPass[k]) {
+							continue; // 通過するホームは次の停車駅ではない
+						}
+						tr.nextStation = s.etaStationIds[k];
+						tr.nextIdeal = s.etaIdealTicks[k] + s.elapsedDwellTicks;
+						break;
+					}
+				}
+			}
+			if (!s.atStop && tr != null && tr.departTick == 0) {
+				for (int k = 0; k < s.etaStationIds.length; k++) {
+					if (k < s.etaPass.length && s.etaPass[k]) {
+						continue;
+					}
+					tr.departTick = tickCount;
+					tr.runStation = s.etaStationIds[k];
+					tr.runIdeal = s.etaIdealTicks[k];
+					break;
 				}
 			}
 			final long last = s.atStop && s.curStationId != 0 ? s.curStationId : tr != null ? tr.station : s.prevStationId;
@@ -356,9 +395,30 @@ public final class OpsServer {
 
 	// ------------------------------------------------------------------ 時刻表API用の同期
 
+	/** 全車庫の理想走行。1回の計算が重い(1tickずつ走行を再現する)ので、1回に数車庫ずつ作り、数分おきに全部作り直す。 */
+	private final java.util.Map<Long, DiaModel.Profile> scheduleProfiles = new java.util.LinkedHashMap<>();
+	private final java.util.Set<Long> scheduleTried = new HashSet<>();
+	private long scheduleProfilesBuilt;
+
 	private void refreshSchedule() {
 		final java.util.Set<Long> depots = DiaAdapter.depotRoutes(server).keySet();
-		final java.util.Map<Long, DiaModel.Profile> profiles = DiaAdapter.buildProfiles(server, depots);
+		if (tickCount - scheduleProfilesBuilt > 12000) {
+			scheduleProfilesBuilt = tickCount;
+			scheduleProfiles.clear();
+			scheduleTried.clear();
+		}
+		scheduleProfiles.keySet().retainAll(depots);
+		final List<Long> todo = new ArrayList<>();
+		for (final Long d : depots) {
+			if (!scheduleTried.contains(d) && todo.size() < 4) {
+				todo.add(d);
+			}
+		}
+		if (!todo.isEmpty()) {
+			scheduleTried.addAll(todo); // 経路が無く作れなかった車庫も、次の全体の作り直しまで再計算しない
+			scheduleProfiles.putAll(DiaAdapter.buildProfiles(server, todo));
+		}
+		final java.util.Map<Long, DiaModel.Profile> profiles = scheduleProfiles;
 		final long now = System.currentTimeMillis();
 		final java.util.Map<Long, List<Long>> deploys = DiaAdapter.upcomingDeploys(server, now, 3L * 3600_000L);
 		scheduleBytes = ScheduleSync.encode(now, profiles, deploys, saved.sections, Net.MAX_S2C_BYTES);
@@ -404,6 +464,16 @@ public final class OpsServer {
 	// ------------------------------------------------------------------ 台帳の更新(クライアント → サーバー)
 
 	public void handleDepotUpdate(ServerPlayer player, byte[] payload) {
+		try {
+			handleDepotUpdateInner(player, payload);
+		} catch (RuntimeException | LinkageError e) {
+			// プレイヤーの操作で例外が出てもサーバーは止めない
+			LOGGER.error("handleDepotUpdate で例外が発生しました: {}", e.toString(), e);
+			sendResult(player, Net.RESULT_BAD_PAYLOAD, "サーバーで処理できませんでした");
+		}
+	}
+
+	private void handleDepotUpdateInner(ServerPlayer player, byte[] payload) {
 		if (!canEdit(player)) {
 			sendResult(player, Net.RESULT_NO_PERMISSION, "車庫台帳を編集する権限がありません");
 			return;
@@ -436,6 +506,16 @@ public final class OpsServer {
 	}
 
 	public void handleDiaUpdate(ServerPlayer player, int baseRev, byte[] deflated) {
+		try {
+			handleDiaUpdateInner(player, baseRev, deflated);
+		} catch (RuntimeException | LinkageError e) {
+			// プレイヤーの操作で例外が出てもサーバーは止めない
+			LOGGER.error("handleDiaUpdate で例外が発生しました: {}", e.toString(), e);
+			sendResult(player, Net.RESULT_BAD_PAYLOAD, "サーバーで処理できませんでした");
+		}
+	}
+
+	private void handleDiaUpdateInner(ServerPlayer player, int baseRev, byte[] deflated) {
 		if (!canEdit(player)) {
 			sendResult(player, Net.RESULT_NO_PERMISSION, "ダイヤを編集する権限がありません");
 			return;

@@ -52,3 +52,28 @@ const name = String(Api.entryTypeName(e));     // 例: "E233系1000番台"
 というマッチングをしています。始発前(まだ車庫にいる)の予定や、次駅情報(詳細レベル1以上)が無い場合は該当なし(`""` / `0`)になります。車種(`entryTypeId` など)は詳細レベル3以上のときに取れます。
 同じホームの到着予定一覧は `ClientData.SCHEDULES_FOR_PLATFORM` から読みます。読めない版では「直近2秒以内に問い合わせたエントリ」から順位を数えます(到着の早い順に問い合わせるスクリプトを想定)。
 MTR 3.2.2 の `ScheduleEntry` はホームIDを持たないため、`ClientData.SCHEDULES_FOR_PLATFORM` のどのホームの一覧に入っているかで判定します。列車との対応は、サーバーから届く到着予想(そのホームに早く着く順)を優先します。
+
+## そのホームを通過する列車(停車しない列車)
+
+停車しない列車は `ScheduleEntry` に出ないため、ホームIDで引く専用のメソッドを使います。`i` は 0 が通過の一番早い列車です。
+
+| メソッド | 戻り値 |
+|---|---|
+| `passCount(platformId, horizonSec)` | 今から `horizonSec` 秒以内にそのホームを通過する列車の数 |
+| `passMillis(platformId, i)` | 通過時刻(UNIXミリ秒、mtrops の補正済み)。無ければ `0` |
+| `passInSec(platformId, i)` | 通過までの残り(秒)。無ければ `-1` |
+| `passDelaySec(platformId, i)` | 遅れ(秒) |
+| `passNumber(platformId, i)` | 編成番号 |
+| `passTypeId(platformId, i)` / `passTypeName(platformId, i)` | 車両ID / 車両名 |
+| `passRouteId(platformId, i)` / `passTrainId(platformId, i)` | 路線ID / 列車ID(文字列) |
+
+```js
+const n = Api.passCount(platformId, 600);        // 10分以内の通過列車
+for (let i = 0; i < n; i++) {
+  const t = new Date(Api.passMillis(platformId, i));
+  // 例: 「通過 12:34 / 1001F」
+}
+```
+
+通過は、列車の経路のうち「ホームのレールを止まらずに通る箇所」から求めます(経路の残りの1周目まで)。通過時刻は、ホームの手前端に先頭が着く時刻です。
+駅の時刻表API(`/api/schedule/駅`)にも `"pass":true` の行として出ます(`departure` は `arrival` と同じ)。列車の `etas` にも `pass` が付きます。

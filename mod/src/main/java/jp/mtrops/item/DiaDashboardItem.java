@@ -10,7 +10,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 
 /**
- * ダイヤ式鉄道ダッシュボード。MTRの鉄道ダッシュボード(ItemDashboard)と同じく、使うと画面を開く。
+ * ダイヤ編成ツール。MTRの鉄道ダッシュボード(ItemDashboard)と同じく、使うと画面を開く。
  * MTRのダッシュボードには一切手を入れず、路線・車庫・ホームなどはMTRで作ったものをそのまま読むだけ。
  * 画面を開く指示はサーバーから送る(MTRと同じ方式。専用サーバーでクライアント側のクラスを読み込まないため)。
  */

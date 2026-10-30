@@ -43,6 +43,27 @@ public final class DiaRuntime {
 	private final Map<Long, Map<Integer, Integer>> stopOfPath = new HashMap<>();
 	private final Map<Long, Assign> assigns = new HashMap<>();
 	private final Map<String, Long> taken = new HashMap<>();
+	/** ホームごとの、最後にカスタムダイヤの列車が発車したUNIXミリ秒(前の列車に詰まらないための間隔確保に使う) */
+	private final Map<Long, Long> lastDepart = new HashMap<>();
+
+	public synchronized void recordDeparture(long platformId, long millis) {
+		if (platformId != 0) {
+			lastDepart.put(platformId, millis);
+		}
+	}
+
+	/**
+	 * 前の列車の発車から minGapSec 秒あけるために、あと何tick待つべきか(0以上)。
+	 * 遅れて前の列車に追いついた列車を、ホームで少し待たせて間隔を戻す(連続した遅れ・詰まりの自動調整)。
+	 */
+	public synchronized int gapRemainingTicks(long platformId, int minGapSec, long nowMillis) {
+		final Long t = lastDepart.get(platformId);
+		if (t == null || minGapSec <= 0) {
+			return 0;
+		}
+		final long remain = t + minGapSec * 1000L - nowMillis;
+		return remain <= 0 ? 0 : (int) Math.min(remain / 50, minGapSec * 20L);
+	}
 
 	public synchronized void update(DiaModel.Config cfg, Map<Long, DiaModel.Profile> profs, Map<Long, List<Long>> depotRoutes) {
 		this.config = cfg;
@@ -68,6 +89,7 @@ public final class DiaRuntime {
 		// 便の並びが変わったら割り当てをやり直す(便番号の意味が変わるため)
 		assigns.clear();
 		taken.clear();
+		lastDepart.clear();
 	}
 
 	public synchronized DiaPlanner.Result plan() {

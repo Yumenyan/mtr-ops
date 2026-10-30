@@ -214,7 +214,7 @@ public final class DiaAdapter {
 
 
 	@SuppressWarnings("unchecked")
-	private static Map<java.util.UUID, Platform> platformsByRail(Set<Platform> platforms) {
+	static Map<java.util.UUID, Platform> platformsByRail(Set<Platform> platforms) {
 		final Map<java.util.UUID, Platform> map = new HashMap<>();
 		if (SAVED_RAIL_POSITIONS == null) {
 			return map;

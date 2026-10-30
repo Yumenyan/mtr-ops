@@ -14,8 +14,8 @@ import net.minecraft.resources.ResourceLocation;
  *  S2C EDIT_RESULT   DEPOT_UPDATE / DIA_UPDATE の結果(コード + メッセージ)
  *  S2C DIA           カスタムダイヤ: 設定・理想走行・タイムゾーン(変更時)
  *  S2C DIA_LIVE      カスタムダイヤ: 列車ごとの便・遅れ(数秒ごと)
- *  C2S DIA_UPDATE    カスタムダイヤの設定(全体。rev付き。ダイヤ式鉄道ダッシュボードから)
- *  S2C OPEN_DIA      ダイヤ式鉄道ダッシュボード(アイテム)を使った → クライアントで画面を開く
+ *  C2S DIA_UPDATE    カスタムダイヤの設定(全体。rev付き。ダイヤ編成ツールから)
+ *  S2C OPEN_DIA      ダイヤ編成ツール(アイテム)を使った → クライアントで画面を開く
  *  S2C ETAS          列車ごとの到着予想(折り返し後の路線も含め2時間先まで。約1秒ごと)
  *  S2C SCHEDULE      全車庫の理想走行・今後の出庫時刻・駅間の所要時間の実績(時刻表API用、約20秒ごと)
  *
@@ -24,7 +24,7 @@ import net.minecraft.resources.ResourceLocation;
 public final class Net {
 
 	public static final String MOD_ID = "mtrops";
-	public static final int PROTOCOL = 8;
+	public static final int PROTOCOL = 9;
 
 	public static final ResourceLocation HELLO = new ResourceLocation(MOD_ID, "hello");
 	public static final ResourceLocation TOPOLOGY = new ResourceLocation(MOD_ID, "topology");

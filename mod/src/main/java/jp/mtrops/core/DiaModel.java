@@ -151,7 +151,7 @@ public final class DiaModel {
 		/** 遅れているとき、ドアが開いてから最短で何秒で閉め始めるか */
 		public int minOpen = 3;
 		/** 自動の待避・抑止で入れてよい最大の停車延長(秒) */
-		public int maxHold = 600;
+		public int maxHold = 180;
 		/** 余裕時分: 駅間ごとに足す秒と、走行時間に対する割合(%)。MTRの実際の走りとの誤差を吸収する */
 		public int slackSec = 2;
 		public int slackPct = 3;

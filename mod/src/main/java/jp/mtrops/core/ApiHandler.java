@@ -33,7 +33,7 @@ import java.util.function.Function;
  * GET /api/runtimes      駅間ごとの所要時間(MTRの理論値・走行・停車・実績)
  * GET /api/schedule/{駅} 駅の時刻表(出庫予定と所要時間の推定から。?hours=2)。駅はID・英名・和名で指定(例 nagaumi)
  * GET /api/rails         レールの形と種別(鉄道/船/ケーブルカー/飛行機、本線/ホーム/車庫線/折返し 等)。/api/geometry/rails も同じ
- * GET /api/dia           カスタムダイヤの設定・時刻表・運行中の列車の便と遅れ(読み取りのみ。編集はゲーム内のダイヤ式鉄道ダッシュボード)
+ * GET /api/dia           カスタムダイヤの設定・時刻表・運行中の列車の便と遅れ(読み取りのみ。編集はゲーム内のダイヤ編成ツール)
  * 列車の etas(到着予想)は折り返し後の路線も含む。既定は20分先まで(?etaHorizon=秒 で変更、最大7200)
  *
  * IDはJavaScriptで精度が落ちるため、すべて文字列で返す。
@@ -790,6 +790,7 @@ public final class ApiHandler {
 		long routeId;
 		long depotId;
 		boolean custom;
+		boolean pass;
 		TrainView train;
 	}
 
@@ -831,7 +832,8 @@ public final class ApiHandler {
 					if (x.arr < now - 30_000 || x.arr > until) {
 						continue;
 					}
-					x.dep = x.arr + (long) (platformDwell.getOrDefault(e.platformId, 0.0) * 1000);
+					x.pass = e.pass;
+					x.dep = e.pass ? x.arr : x.arr + (long) (platformDwell.getOrDefault(e.platformId, 0.0) * 1000);
 					if (e.schedTicks != TrainSample.NO_SCHED) {
 						x.sched = es.receivedMillis + e.schedTicks * 50L;
 					}
@@ -925,6 +927,9 @@ public final class ApiHandler {
 		for (final Ent x : list) {
 			w.beginObject();
 			w.field("kind", x.kind);
+			if (x.pass) {
+				w.field("pass", true);
+			}
 			w.field("arrival", hhmmss(x.arr)).field("departure", hhmmss(x.dep));
 			w.field("arrivalMillis", x.arr).field("departureMillis", x.dep);
 			w.field("inSec", Math.max(0, (x.arr - now) / 1000));
@@ -947,7 +952,7 @@ public final class ApiHandler {
 				final long last = r.stationIds.length == 0 ? 0 : r.stationIds[r.stationIds.length - 1];
 				final Topology.Station dest = stationMap.get(last);
 				w.field("destination", !r.destination.isEmpty() ? r.destination : dest == null ? "" : dest.name);
-				w.field("terminating", last == st.id);
+				w.field("terminating", !x.pass && last == st.id);
 			}
 			w.idField("depotId", x.depotId);
 			final Topology.Depot d = depotMap.get(x.depotId);
@@ -1225,6 +1230,9 @@ public final class ApiHandler {
 					w.field("routeName", r.name);
 				}
 				w.field("turnback", e.routeId != v.s.routeId);
+			}
+			if (e.pass) {
+				w.field("pass", true);
 			}
 			w.field("sec", Math.max(0, Math.round(sec)));
 			final long at = es.receivedMillis + e.ticks * 50L;

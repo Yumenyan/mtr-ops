@@ -28,6 +28,7 @@ MTRmod 3.2.2-hotfix-1 / Minecraft 1.19.2 / Fabric 用。サーバーが車庫・
 - `GET /api/runtimes` 駅間ごとの所要時間(MTRの理論値の走行・停車、実測の平均、見込み)。`/api/sections` `/api/routes/{id}` にも `runtime` が付きます
 - `GET /api/rails`(`/api/geometry/rails`)レール1本ごとの形と種別(`mode`=train/boat/cable_car/airplane、`type`=MTRのRailType、`role`=line/platform/siding/turn_back 等)。`/api/geometry` の区間にも `mode` と `parts`(種別ごとの区切り)が付きます
 - 列車の `etas`(到着予想)は折り返し後の路線も含み、既定で20分先まで(`?etaHorizon=秒`)。MTRの発車標と同じ計算を、駅間ごとの実績で補正しています
+- 停車しない列車(通過)も、`/api/schedule/駅` の `"pass":true` と、列車の `etas` の `pass` で取れます(発車標からは `passCount` などのメソッド)
 - `GET /api/dia` カスタムダイヤ(読み取りのみ)
 - そのほか `/api/live` `/api/trains` `/api/stations` など。ID はすべて文字列です。
 
@@ -53,7 +54,7 @@ MTRmod 3.2.2-hotfix-1 / Minecraft 1.19.2 / Fabric 用。サーバーが車庫・
 - 専用サーバー側HTTPは未実装(クライアント側のみ)。
 
 ## カスタムダイヤ(時刻表運転)
-アイテム「ダイヤ式鉄道ダッシュボード」(MTRの鉄道ダッシュボード + 時計でクラフト)で、すべてゲーム内で設定します。詳しくは `docs/CUSTOM_DIA.md`。
+アイテム「ダイヤ編成ツール」(MTRの鉄道ダッシュボード + 時計でクラフト)で、すべてゲーム内で設定します。詳しくは `docs/CUSTOM_DIA.md`。
 
 ## Webアプリ(v2)
 東京メトロmy!アプリをPC向けにしたデザインです。ホーム(路線シンボルの選択 → 運行状況 → 横型の列車位置)、路線一覧、車両、スタック調査、設定。

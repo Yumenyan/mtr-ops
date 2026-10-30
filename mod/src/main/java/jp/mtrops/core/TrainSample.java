@@ -63,6 +63,8 @@ public final class TrainSample {
 	public long[] etaRouteIds = new long[0];
 	public int[] etaTicks = new int[0];
 	public int[] etaSchedTicks = new int[0];
+	/** true = 停車せず通過するホーム(発車標には出ない通過列車)。到着=通過の時刻 */
+	public boolean[] etaPass = new boolean[0];
 	/** 補正前のMTRの理論値(tick、サーバー内だけで使う。通信には載せない) */
 	public int[] etaIdealTicks = new int[0];
 	public static final int MAX_ETAS = 64;
