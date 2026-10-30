@@ -371,9 +371,9 @@ public final class OpsServer {
 			if (custom) {
 				final DiaRuntime.Assign a = rt.assignOf(s.id);
 				if (a != null) {
-					final DiaModel.Run run = rt.plan().find(a.depotId, a.no);
-					final int currentStop = s.atStop ? rt.stopOf(a.depotId, s.nextStopIndex) : -1;
-					EtaPlanner.applyTimetable(s, rt.profile(a.depotId), run, a.lastStop, currentStop, dia.nowSec(), rt.config().minOpen);
+					final DiaModel.Run run = rt.plan().find(a.routeId, a.no);
+					final DiaModel.Stop here = s.atStop ? rt.stopAt(s.depotId, s.nextStopIndex) : null;
+					EtaPlanner.applyTimetable(s, rt.plan().info.get(a.routeId), run, a.lastStop, here == null ? -1 : here.stationIndex, dia.nowSec(), rt.config().minOpen);
 				}
 			}
 		}

@@ -24,18 +24,12 @@ public final class DiaHooks {
 
 		DiaRuntime runtime();
 
-		/** 列車が今走っている路線、無ければ車庫の最初のカスタム路線の設定 */
-		DiaModel.RouteSetting setting(long routeId, long depotId);
-
 		/** サーバーのタイムゾーンでの、その日の0時からの秒(小数あり) */
 		double nowSec();
 
 		int minOpenTicks();
 
 		long currentTick();
-
-		/** カスタムダイヤの車庫の出庫時刻(UTCのその日の0時からのミリ秒、MTRの Depot.tempDepartures と同じ形)。カスタムでなければ null */
-		List<Integer> departuresMillis(long depotId);
 	}
 
 	/** ATC/ATS のパターンに使う減速度(列車の加減速度に対する割合)。常用ブレーキ相当で早めに減速し始める */
@@ -52,7 +46,6 @@ public final class DiaHooks {
 	private static final class State {
 		boolean onRoute;
 		int stoppedAt = -1;
-		long stoppedPlatform;
 		boolean adjusted;
 		boolean limited;
 		long lastSync;
@@ -86,25 +79,6 @@ public final class DiaHooks {
 		}
 	}
 
-	// ------------------------------------------------------------------ 出庫時刻(Depot.generateTempDepartures の最後)
-
-	/** カスタムダイヤの車庫だけ、作業用の出庫時刻を時刻表のものに置き換える。保存される設定(departures 等)は触らない。 */
-	public static void overrideDepartures(mtr.data.Depot depot) {
-		final Context c = context;
-		if (c == null || depot == null) {
-			return;
-		}
-		try {
-			final List<Integer> ms = c.departuresMillis(depot.id);
-			if (ms != null && !ms.isEmpty()) {
-				depot.tempDepartures.clear();
-				depot.tempDepartures.addAll(ms);
-				depot.tempDepartures.sort(Integer::compareTo);
-			}
-		} catch (RuntimeException ignored) {
-		}
-	}
-
 	// ------------------------------------------------------------------ 速度(Train.simulateTrain の getRailSpeed を置き換え)
 
 	public static float railSpeed(Train train, int railIndex) {
@@ -123,9 +97,13 @@ public final class DiaHooks {
 			if (depot == 0 || !c.runtime().isCustomDepot(depot)) {
 				return original;
 			}
-			final DiaModel.RouteSetting rs = c.setting(MtrFields.routeId(t), depot);
+			final long routeId = MtrFields.routeId(t);
+			final DiaModel.RouteSetting rs = c.runtime().route(routeId);
+			if (rs == null || !rs.custom || !c.runtime().isCustomRoute(routeId)) {
+				return original;
+			}
 			float v = DiaRuntime.recoverySpeed(original, rs, c.runtime().delayOf(t.id));
-			final int safety = rs == null ? DiaModel.SAFETY_ATC : rs.safety;
+			final int safety = rs.safety;
 			if (safety != DiaModel.SAFETY_OFF) {
 				final double d = obstacleDistance(t);
 				v = DiaRuntime.safetyLimit(safety, d, t.accelerationConstant * ATC_DECEL, v);
@@ -203,10 +181,7 @@ public final class DiaHooks {
 			st.adjusted = false;
 			return;
 		}
-		if (!st.onRoute) {
-			st.onRoute = true;
-			rt.onDeploy(t.id, depot, (int) Math.floor(now), millis);
-		}
+		st.onRoute = true;
 		final List<PathData> path = t.path;
 		final int nsi = MtrFields.nextStoppingIndex(t);
 		if (nsi < 0 || nsi >= path.size()) {
@@ -214,9 +189,10 @@ public final class DiaHooks {
 		}
 		final List<Double> dist = MtrFields.distances(t);
 		final PathData pd = path.get(nsi);
-		final int stop = rt.stopOf(depot, nsi);
-		if (stop >= 0 && rt.assignOf(t.id) == null) {
-			rt.guess(t.id, depot, stop, (int) Math.floor(now), millis);
+		final DiaModel.Stop stopInfo = rt.stopAt(depot, nsi);
+		final int stop = stopInfo == null ? -1 : stopInfo.stationIndex;
+		if (stopInfo != null && !t.isCurrentlyManual()) {
+			rt.ensure(t.id, stopInfo, (int) Math.floor(now), millis);
 		}
 		final boolean stopped = t.getSpeed() == 0;
 		final boolean atPlatform = stopped && pd.dwellTime > 0 && dist.size() > nsi && Math.abs(t.getRailProgress() - dist.get(nsi)) < 1.5;
@@ -226,9 +202,7 @@ public final class DiaHooks {
 			if (target != Integer.MIN_VALUE) {
 				double diff = target - now;
 				diff = ((diff % DiaModel.DAY) + DiaModel.DAY + DiaModel.DAY / 2.0) % DiaModel.DAY - DiaModel.DAY / 2.0;
-				int remaining = (int) Math.round(diff * 20);
-				// 前の列車が出てから最低限の間隔(同じホームの最小間隔 + 20秒)をあける。遅れて追いついても詰まらないように自動で待たせる
-				remaining = Math.max(remaining, rt.gapRemainingTicks(pd.savedRailBaseId, rt.config().sep + 20, millis));
+				final int remaining = (int) Math.round(diff * 20);
 				final float e = MtrFields.elapsedDwellTicks(t);
 				final float ne = DiaRuntime.adjustDwell(e, pd.dwellTime * 10, remaining, c.minOpenTicks());
 				if (Math.abs(ne - e) > 1e-3F) {
@@ -237,10 +211,8 @@ public final class DiaHooks {
 				}
 			}
 			st.stoppedAt = stop;
-			st.stoppedPlatform = pd.savedRailBaseId;
 		} else if (!stopped && st.stoppedAt >= 0) {
 			rt.onDepart(t.id, st.stoppedAt, (int) Math.floor(now));
-			rt.recordDeparture(st.stoppedPlatform, millis);
 			st.stoppedAt = -1;
 		}
 		if (tick % 20 == t.id % 20) {

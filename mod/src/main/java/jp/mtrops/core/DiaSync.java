@@ -22,6 +22,8 @@ public final class DiaSync {
 		public DiaModel.Config config = new DiaModel.Config();
 		public Map<Long, DiaModel.Profile> profiles = new LinkedHashMap<>();
 		public List<Long> customDepots = new ArrayList<>();
+		/** 駅間ごとの走行時間の実績比率(DiaStretch.ratios)。サーバーと同じ計算にするために同期する */
+		public Map<String, Double> ratios = new java.util.HashMap<>();
 		/** 設定と理想走行から作り直した時刻表(サーバーと同じ計算) */
 		public DiaPlanner.Result plan = new DiaPlanner.Result();
 		public boolean received;
@@ -37,7 +39,7 @@ public final class DiaSync {
 	private DiaSync() {
 	}
 
-	public static byte[] encode(String zone, int utcOffset, DiaModel.Config config, Map<Long, DiaModel.Profile> profiles, List<Long> customDepots) {
+	public static byte[] encode(String zone, int utcOffset, DiaModel.Config config, Map<Long, DiaModel.Profile> profiles, List<Long> customDepots, Map<String, Double> ratios) {
 		try {
 			final ByteArrayOutputStream bos = new ByteArrayOutputStream();
 			final DataOutputStream out = new DataOutputStream(bos);
@@ -54,6 +56,11 @@ public final class DiaSync {
 			out.writeInt(custom.size());
 			for (final Long d : custom) {
 				out.writeLong(d);
+			}
+			out.writeInt(ratios.size());
+			for (final Map.Entry<String, Double> e : ratios.entrySet()) {
+				out.writeUTF(e.getKey());
+				out.writeDouble(e.getValue());
 			}
 			out.flush();
 			return bos.toByteArray();
@@ -76,7 +83,15 @@ public final class DiaSync {
 		for (int i = 0; i < n; i++) {
 			s.customDepots.add(in.readLong());
 		}
-		s.plan = DiaPlanner.plan(s.config, s.customDepots, s.profiles);
+		final int rn = in.readInt();
+		if (rn < 0 || rn > 100_000) {
+			throw new IOException("bad ratio count");
+		}
+		for (int i = 0; i < rn; i++) {
+			final String k = in.readUTF();
+			s.ratios.put(k, in.readDouble());
+		}
+		s.plan = DiaPlanner.plan(s.config, s.profiles, s.ratios);
 		s.received = true;
 		return s;
 	}
@@ -99,7 +114,7 @@ public final class DiaSync {
 			out.writeInt(views.size());
 			for (final DiaRuntime.View v : views) {
 				out.writeLong(v.trainId);
-				out.writeLong(v.depotId);
+				out.writeLong(v.routeId);
 				out.writeInt(v.no);
 				out.writeInt(v.lastStop);
 				out.writeInt(v.delay);
@@ -123,7 +138,7 @@ public final class DiaSync {
 		for (int i = 0; i < n; i++) {
 			final DiaRuntime.View v = new DiaRuntime.View();
 			v.trainId = in.readLong();
-			v.depotId = in.readLong();
+			v.routeId = in.readLong();
 			v.no = in.readInt();
 			v.lastStop = in.readInt();
 			v.delay = in.readInt();

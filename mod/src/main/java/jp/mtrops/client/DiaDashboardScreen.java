@@ -6,7 +6,6 @@ import jp.mtrops.core.DiaModel;
 import jp.mtrops.core.DiaPlanner;
 import jp.mtrops.core.DiaSync;
 import jp.mtrops.core.Topology;
-import mtr.client.ClientData;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.network.chat.Component;
@@ -19,29 +18,22 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * ダイヤ編成ツール(アイテムを使うと開く)。カスタムダイヤの設定はすべてここで行う。
- *
- *  路線 … MTRで作った路線を「ダイヤに移行」すると、その路線を含む車庫の列車が時刻表運転になる(保安装置・回復運転もここ)
- *  車庫 … 車庫ごとの時刻表(DiaDepotScreen)
- *  全体 … 同じホームの最小間隔・余裕時分など
+ * ダイヤ編成ツール(アイテムを使うと開く)の入口。路線を選ぶと、その路線の時刻表(DiaRouteScreen)が開く。
+ * このツールは「各路線のホームを発車する時刻」をゲーム内で決めるためのもの。出庫・車庫の設定はMTRのまま触らない。
  *
  * 路線・車庫・ホーム・レール(MTRのデータ)は読むだけで、書き換えない。保存先は mtrops のダイヤ設定だけ。
- * 見た目はバニラに寄せ、説明はカーソルを合わせたときの短いツールチップにする。
+ * 右側には、いまのダイヤ全体で詰まる所・待避できる所を、編集に合わせてリアルタイムに出す。
  */
 public final class DiaDashboardScreen extends TipScreen {
 
-	private enum Tab {ROUTES, DEPOTS, SETTINGS}
-
 	private static final int ROW = 20;
-	private static final int W = 420;
-	private static final int LIST_W = 190;
-	private static final String[] SAFETY = {"保安 なし", "保安 ATS", "保安 ATC"};
-	private static final String[] SAFETY_TIP = {"MTR標準(保安装置なし)", "ATS: 先行列車に近づくと段階的に減速", "ATC: 先行列車の手前で止まれる速度に連続で制限"};
+	private static final int LIST_W = 180;
+	private static final int PANEL_W = 220;
+	private static final int GAP = 10;
 
 	private final ClientStore store = OpsClient.STORE;
-	private final boolean canEdit;
-	private Tab tab = Tab.ROUTES;
-	/** 編集中の設定(保存するまでサーバーには送らない)。DiaDepotScreen と共有する */
+	final boolean canEdit;
+	/** 編集中の設定(保存するまでサーバーには送らない)。DiaRouteScreen と共有する */
 	DiaModel.Config working;
 	int baseRev;
 	boolean dirty;
@@ -49,14 +41,15 @@ public final class DiaDashboardScreen extends TipScreen {
 	private int seenSeq;
 	private int page;
 	private String filter = "";
-	private long selectedRoute;
-	private long selectedDepot;
 	private String status = "";
 	private int statusColor = 0xA0A0A0;
 	private EditBox search;
 	private final List<EditBox> boxes = new ArrayList<>();
 	private DiaPlanner.Result preview;
+	private long previewAt;
+	private boolean previewStale = true;
 	private int x0;
+	private int w0;
 
 	public DiaDashboardScreen(boolean canEdit) {
 		super(Component.literal("ダイヤ編成ツール"));
@@ -71,12 +64,12 @@ public final class DiaDashboardScreen extends TipScreen {
 		working = st.config.copy();
 		baseRev = st.config.rev;
 		dirty = false;
-		preview = null;
+		previewStale = true;
 	}
 
 	void markDirty() {
 		dirty = true;
-		preview = null;
+		previewStale = true;
 	}
 
 	// ------------------------------------------------------------------ データ
@@ -93,49 +86,24 @@ public final class DiaDashboardScreen extends TipScreen {
 		return list;
 	}
 
-	private List<Topology.Depot> depots() {
-		final List<Topology.Depot> list = new ArrayList<>();
-		final String f = filter.toLowerCase(Locale.ROOT);
-		for (final Topology.Depot d : store.topology().depots) {
-			if (d.routeIds.length > 0 && (f.isEmpty() || nm(d.name).toLowerCase(Locale.ROOT).contains(f))) {
-				list.add(d);
-			}
-		}
-		list.sort(Comparator.comparing((Topology.Depot d) -> !isDepotCustom(d)).thenComparing(d -> nm(d.name)));
-		return list;
+	/** 車庫を出た列車の理想走行(停車駅と時刻)。ダイヤ同期のもの(ダイヤ運転の路線を含む車庫)を優先し、無ければ時刻表API用の同期から。 */
+	Map<Long, DiaModel.Profile> profiles() {
+		final Map<Long, DiaModel.Profile> all = new LinkedHashMap<>(store.schedule().profiles);
+		all.putAll(store.dia().profiles);
+		return all;
 	}
 
-	boolean isDepotCustom(Topology.Depot d) {
-		for (final long r : d.routeIds) {
-			if (working.isCustom(r)) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/** 理想走行(停車駅と時刻)。カスタムダイヤの車庫はダイヤ同期のもの、まだ移行していない車庫は時刻表API用の同期から。 */
-	DiaModel.Profile profile(long depotId) {
-		final DiaModel.Profile p = store.dia().profiles.get(depotId);
-		return p != null ? p : store.schedule().profiles.get(depotId);
-	}
-
-	/** 編集中の設定で時刻表を作り直す(画面表示用。サーバーも保存後に同じ計算をする)。 */
+	/**
+	 * 編集中の設定で時刻表と診断を作り直す(画面表示用。サーバーも保存後に同じ計算をする)。
+	 * 編集のたびに重い計算をしないよう、変更後に作り直すのは0.25秒に1回まで。
+	 */
 	DiaPlanner.Result preview() {
-		if (preview == null) {
-			final List<Long> custom = new ArrayList<>();
-			final Map<Long, DiaModel.Profile> profs = new LinkedHashMap<>();
-			for (final Topology.Depot d : store.topology().depots) {
-				if (isDepotCustom(d)) {
-					custom.add(d.id);
-					final DiaModel.Profile p = profile(d.id);
-					if (p != null) {
-						profs.put(d.id, p);
-					}
-				}
-			}
+		final long now = System.currentTimeMillis();
+		if (preview == null || previewStale && now - previewAt > 250) {
+			previewAt = now;
+			previewStale = false;
 			try {
-				preview = DiaPlanner.plan(working, custom, profs);
+				preview = DiaPlanner.plan(working, profiles(), store.dia().ratios);
 			} catch (RuntimeException e) {
 				preview = new DiaPlanner.Result();
 				preview.warnings.add("時刻表を作れませんでした");
@@ -163,57 +131,40 @@ public final class DiaDashboardScreen extends TipScreen {
 		this.clearWidgets();
 		clearTips();
 		boxes.clear();
-		x0 = (this.width - W) / 2;
-		final int tw = W / 3;
-		final Button t1 = new Button(x0, 22, tw, 20, Component.literal("路線"), b -> switchTab(Tab.ROUTES));
-		final Button t2 = new Button(x0 + tw, 22, tw, 20, Component.literal("車庫"), b -> switchTab(Tab.DEPOTS));
-		final Button t3 = new Button(x0 + tw * 2, 22, W - tw * 2, 20, Component.literal("全体"), b -> switchTab(Tab.SETTINGS));
-		t1.active = tab != Tab.ROUTES;
-		t2.active = tab != Tab.DEPOTS;
-		t3.active = tab != Tab.SETTINGS;
-		this.addRenderableWidget(t1);
-		this.addRenderableWidget(t2);
-		this.addRenderableWidget(t3);
-		tip(x0, 22, tw, 20, "路線ごとの運転方式");
-		tip(x0 + tw, 22, tw, 20, "車庫ごとの時刻表");
-		tip(x0 + tw * 2, 22, W - tw * 2, 20, "間隔・余裕時分");
+		w0 = Math.min(LIST_W + GAP + PANEL_W, this.width - 12);
+		x0 = (this.width - w0) / 2;
+		search = new EditBox(this.font, x0, 24, LIST_W, 16, Component.literal(""));
+		search.setValue(filter);
+		search.setResponder(v -> {
+			if (!v.equals(filter)) {
+				filter = v;
+				page = 0;
+				rebuildKeepingSearch();
+			}
+		});
+		this.addRenderableWidget(search);
+		tip(x0, 24, LIST_W, 16, "路線を検索");
+		buildRouteList();
 
-		if (tab != Tab.SETTINGS) {
-			search = new EditBox(this.font, x0, 48, LIST_W, 16, Component.literal(""));
-			search.setValue(filter);
-			search.setResponder(v -> {
-				if (!v.equals(filter)) {
-					filter = v;
-					page = 0;
-					rebuildKeepingSearch();
-				}
-			});
-			this.addRenderableWidget(search);
-			tip(x0, 48, LIST_W, 16, "検索");
-		}
-		if (tab == Tab.ROUTES) {
-			buildRouteList();
-			buildRouteDetail();
-		} else if (tab == Tab.DEPOTS) {
-			buildDepotList();
-			buildDepotDetail();
-		} else {
-			buildSettings();
+		final int px = x0 + LIST_W + GAP;
+		final int pw = w0 - LIST_W - GAP;
+		if (pw >= 120) {
+			number(px + pw - 40, 24, 40, working.sep, 600, v -> working.sep = v);
+			tip(px, 24, pw, 16, "同じホームを使う列車の最小間隔(秒)。これより近いと「詰まる」と案内する");
+			number(px + pw - 40, 44, 40, working.minOpen, 60, v -> working.minOpen = v);
+			tip(px, 44, pw, 16, "遅れているとき、ドアを開けておく最短の秒数");
 		}
 
-		final int by = this.height - 28;
-		final int bw = (W - 8) / 3;
-		final Button save = new Button(x0, by, bw, 20, Component.literal(dirty ? "§e保存" : "保存"), b -> save());
-		save.active = canEdit;
-		this.addRenderableWidget(save);
-		this.addRenderableWidget(new Button(x0 + bw + 4, by, bw, 20, Component.literal("再読込"), b -> {
+		final int by = this.height - 26;
+		button(x0, by, 80, 20, dirty ? "§e保存" : "保存", b -> save()).active = canEdit;
+		button(x0 + 84, by, 80, 20, "再読込", b -> {
 			load();
 			setStatus("", 0xA0A0A0);
 			build();
-		}));
-		this.addRenderableWidget(new Button(x0 + (bw + 4) * 2, by, W - (bw + 4) * 2, 20, Component.literal("閉じる"), b -> onClose()));
-		tip(x0, by, bw, 20, canEdit ? "サーバーに保存" : "編集する権限がありません");
-		tip(x0 + bw + 4, by, bw, 20, "サーバーの内容を読み直す");
+		});
+		button(x0 + 168, by, 80, 20, "閉じる", b -> onClose());
+		tip(x0, by, 80, 20, canEdit ? "サーバーに保存" : "編集する権限がありません");
+		tip(x0 + 84, by, 80, 20, "サーバーの内容を読み直す");
 	}
 
 	private void rebuildKeepingSearch() {
@@ -225,219 +176,40 @@ public final class DiaDashboardScreen extends TipScreen {
 		}
 	}
 
-	private void switchTab(Tab t) {
-		tab = t;
-		page = 0;
-		filter = "";
-		build();
-	}
-
 	/** 一覧の1ページの行数 */
 	private int listRows() {
-		return Math.max(3, (this.height - 72 - 44) / ROW);
+		return Math.max(3, (this.height - 46 - 52) / ROW);
 	}
-
-	private void pager(int total) {
-		final int per = listRows();
-		final int pages = Math.max(1, (total + per - 1) / per);
-		page = Math.max(0, Math.min(page, pages - 1));
-		if (pages > 1) {
-			final int y = this.height - 28 - 22;
-			this.addRenderableWidget(new Button(x0, y, 40, 18, Component.literal("<"), b -> {
-				page = Math.max(0, page - 1);
-				build();
-			}));
-			this.addRenderableWidget(new Button(x0 + LIST_W - 40, y, 40, 18, Component.literal(">"), b -> {
-				page = Math.min(pages - 1, page + 1);
-				build();
-			}));
-		}
-	}
-
-	// ---- 路線 ----
 
 	private void buildRouteList() {
 		final List<Topology.Route> all = routes();
-		pager(all.size());
 		final int per = listRows();
+		final int pages = Math.max(1, (all.size() + per - 1) / per);
+		page = Math.max(0, Math.min(page, pages - 1));
 		final int start = page * per;
 		for (int i = start; i < Math.min(all.size(), start + per); i++) {
 			final Topology.Route r = all.get(i);
-			final int y = 68 + (i - start) * ROW;
-			final String name = this.font.plainSubstrByWidth(routeName(r.name), LIST_W - 12);
-			this.addRenderableWidget(new Button(x0, y, LIST_W, 18, Component.literal((working.isCustom(r.id) ? "§a" : r.id == selectedRoute ? "§f" : "§7") + name), x -> {
-				selectedRoute = r.id;
-				build();
-			}));
-			tip(x0, y, LIST_W, 18, working.isCustom(r.id) ? "ダイヤ運転" : "通常(MTR)");
-		}
-	}
-
-	private Topology.Route route(long id) {
-		return store.topology().route(id);
-	}
-
-	private void buildRouteDetail() {
-		final Topology.Route r = route(selectedRoute);
-		if (r == null) {
-			return;
-		}
-		final int x = x0 + LIST_W + 10;
-		final int w = W - LIST_W - 10;
-		final DiaModel.RouteSetting s = working.route(r.id);
-		final boolean custom = s != null && s.custom;
-		final Button migrate = new Button(x, 48, w, 20, Component.literal(custom ? "通常に戻す" : "ダイヤに移行"), b -> {
-			if (working.isCustom(r.id)) {
-				setting(r.id).custom = false;
-			} else {
-				setting(r.id).custom = true;
-				migrate(r);
-			}
-			markDirty();
-			build();
-		});
-		migrate.active = canEdit;
-		this.addRenderableWidget(migrate);
-		tip(x, 48, w, 20, custom ? "MTRの通常運転に戻す" : "時刻表どおりに走らせる(線路・ホーム・車庫はそのまま)");
-		if (!custom) {
-			return;
-		}
-		final Button safety = new Button(x, 72, w, 20, Component.literal(SAFETY[Math.max(0, Math.min(2, s.safety))]), b -> {
-			final DiaModel.RouteSetting t = setting(r.id);
-			t.safety = (t.safety + 1) % 3;
-			markDirty();
-			build();
-		});
-		safety.active = canEdit;
-		this.addRenderableWidget(safety);
-		tip(x, 72, w, 20, SAFETY_TIP[Math.max(0, Math.min(2, s.safety))]);
-		number(x + w - 44, 98, 44, s.overKmh, 200, v -> setting(r.id).overKmh = v);
-		tip(x, 98, w, 16, "遅れたとき、最高速度を何km/h超えてよいか");
-		number(x + w - 44, 120, 44, s.maxKmh, 1000, v -> setting(r.id).maxKmh = v);
-		tip(x, 120, w, 16, "回復運転の速度の上限(0 = 上限なし)");
-		number(x + w - 44, 142, 44, s.delayThreshold, 3600, v -> setting(r.id).delayThreshold = v);
-		tip(x, 142, w, 16, "何秒以上遅れたら回復運転するか");
-	}
-
-	/** 路線をダイヤへ移す。その路線を含む車庫に時刻表が無ければ、MTR の車庫の出庫設定から初期値を作る。 */
-	private void migrate(Topology.Route r) {
-		for (final Topology.Depot d : store.topology().depots) {
-			boolean has = false;
-			for (final long id : d.routeIds) {
-				has |= id == r.id;
-			}
-			if (has && !working.plans.containsKey(d.id)) {
-				working.plans.put(d.id, planFromMtr(d.id));
-			}
-		}
-	}
-
-	/** MTR の車庫の出庫設定(実時刻の出庫リスト、または1時間あたりの本数)から、時刻表の初期値を作る。 */
-	static DiaModel.DepotPlan planFromMtr(long depotId) {
-		final DiaModel.DepotPlan p = new DiaModel.DepotPlan();
-		p.depotId = depotId;
-		int headway = 600;
-		try {
-			for (final mtr.data.Depot d : ClientData.DEPOTS) {
-				if (d.id != depotId) {
-					continue;
+			final int y = 46 + (i - start) * ROW;
+			final boolean custom = working.isCustom(r.id);
+			final String name = this.font.plainSubstrByWidth(routeName(r.name), LIST_W - 16);
+			button(x0, y, LIST_W, ROW, (custom ? "§a" : "§7") + name, b -> {
+				if (this.minecraft != null) {
+					this.minecraft.setScreen(new DiaRouteScreen(this, r.id));
 				}
-				if (d.useRealTime && d.departures.size() >= 2) {
-					// 実時刻の出庫(UTCのミリ秒)→ 端末の時刻に直して、初電・終電と間隔(中央値)を取る
-					final int offset = java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 1000;
-					final List<Integer> secs = new ArrayList<>();
-					for (final Integer ms : d.departures) {
-						secs.add(Math.floorMod(ms / 1000 + offset, DiaModel.DAY));
-					}
-					secs.sort(Integer::compareTo);
-					final List<Integer> gaps = new ArrayList<>();
-					for (int i = 1; i < secs.size(); i++) {
-						gaps.add(secs.get(i) - secs.get(i - 1));
-					}
-					gaps.sort(Integer::compareTo);
-					headway = Math.max(30, gaps.get(gaps.size() / 2));
-					p.first = secs.get(0);
-					p.last = secs.get(secs.size() - 1);
-				} else {
-					int most = 0;
-					for (int h = 0; h < 24; h++) {
-						most = Math.max(most, d.getFrequency(h));
-					}
-					// MTR: 1時間(ゲーム内=実時間50秒)あたり frequency/4 本 → 実時間の間隔は 200/frequency 秒
-					if (most > 0) {
-						headway = Math.max(30, Math.round(200F / most));
-					}
-				}
-			}
-		} catch (RuntimeException | LinkageError ignored) {
+			});
+			tip(x0, y, LIST_W, ROW, custom ? "ダイヤ運転の路線。クリックで時刻表を開く" : "通常(MTR)の路線。クリックでダイヤ運転にできる");
 		}
-		p.periods.add(new DiaModel.Period("終日", 0, 2 * DiaModel.DAY, Math.min(4 * 3600, headway)));
-		return p;
-	}
-
-	// ---- 車庫 ----
-
-	private void buildDepotList() {
-		final List<Topology.Depot> all = depots();
-		pager(all.size());
-		final int per = listRows();
-		final int start = page * per;
-		for (int i = start; i < Math.min(all.size(), start + per); i++) {
-			final Topology.Depot d = all.get(i);
-			final int y = 68 + (i - start) * ROW;
-			final String name = this.font.plainSubstrByWidth(nm(d.name), LIST_W - 12);
-			this.addRenderableWidget(new Button(x0, y, LIST_W, 18, Component.literal((isDepotCustom(d) ? "§a" : d.id == selectedDepot ? "§f" : "§7") + name), x -> {
-				selectedDepot = d.id;
+		if (pages > 1) {
+			final int y = this.height - 26 - 22;
+			button(x0, y, 40, 18, "<", b -> {
+				page = Math.max(0, page - 1);
 				build();
-			}));
-			tip(x0, y, LIST_W, 18, isDepotCustom(d) ? "ダイヤ運転" : "通常(MTR)");
+			});
+			button(x0 + LIST_W - 40, y, 40, 18, ">", b -> {
+				page = Math.min(pages - 1, page + 1);
+				build();
+			});
 		}
-	}
-
-	private Topology.Depot depot(long id) {
-		return store.topology().depot(id);
-	}
-
-	private void buildDepotDetail() {
-		final Topology.Depot d = depot(selectedDepot);
-		if (d == null || !isDepotCustom(d)) {
-			return;
-		}
-		final int x = x0 + LIST_W + 10;
-		final int w = W - LIST_W - 10;
-		final Button edit = new Button(x, 48, w, 20, Component.literal("時刻表"), b -> {
-			if (!working.plans.containsKey(d.id)) {
-				working.plans.put(d.id, planFromMtr(d.id));
-				markDirty();
-			}
-			if (this.minecraft != null) {
-				this.minecraft.setScreen(new DiaDepotScreen(this, d.id));
-			}
-		});
-		edit.active = canEdit || working.plans.containsKey(d.id);
-		this.addRenderableWidget(edit);
-		tip(x, 48, w, 20, "この車庫の時刻表を編集");
-	}
-
-	// ---- 全体 ----
-
-	private void buildSettings() {
-		int y = 52;
-		final int x = x0 + W - 54;
-		number(x, y, 54, working.sep, 600, v -> working.sep = v);
-		tip(x0, y, W, 16, "同じホームを使う列車の最小間隔(秒)");
-		y += 24;
-		number(x, y, 54, working.minOpen, 60, v -> working.minOpen = v);
-		tip(x0, y, W, 16, "遅れているとき、ドアを開けておく最短の秒数");
-		y += 24;
-		number(x, y, 54, working.maxHold, 3600, v -> working.maxHold = v);
-		tip(x0, y, W, 16, "自動の待避・抑止で延ばしてよい停車時間の上限(秒)");
-		y += 24;
-		number(x, y, 54, working.slackSec, 120, v -> working.slackSec = v);
-		tip(x0, y, W, 16, "駅間ごとに足す余裕(秒)");
-		y += 24;
-		number(x, y, 54, working.slackPct, 50, v -> working.slackPct = v);
-		tip(x0, y, W, 16, "走行時間に足す余裕(%)");
 	}
 
 	/** 数値の入力欄。入力のたびに設定へ反映する(範囲外は上限に丸める)。 */
@@ -457,7 +229,7 @@ public final class DiaDashboardScreen extends TipScreen {
 
 	// ------------------------------------------------------------------ 保存・状態
 
-	private void save() {
+	void save() {
 		if (!canEdit) {
 			return;
 		}
@@ -470,6 +242,14 @@ public final class DiaDashboardScreen extends TipScreen {
 		statusColor = color;
 	}
 
+	String status() {
+		return status;
+	}
+
+	int statusColor() {
+		return statusColor;
+	}
+
 	@Override
 	public void tick() {
 		super.tick();
@@ -479,6 +259,11 @@ public final class DiaDashboardScreen extends TipScreen {
 		for (final EditBox b : boxes) {
 			b.tick();
 		}
+		pollServer();
+	}
+
+	/** サーバーからの保存結果・更新を取り込む。DiaRouteScreen の間も親が受け持つ(その間は parent.tick は呼ばれないので子から呼ぶ)。 */
+	void pollServer() {
 		if (store.diaSeq() != seenSeq) {
 			seenSeq = store.diaSeq();
 			final boolean ok = store.diaResult() == jp.mtrops.Net.RESULT_DIA_OK;
@@ -487,7 +272,9 @@ public final class DiaDashboardScreen extends TipScreen {
 		if (store.dia() != seenState) {
 			if (!dirty) {
 				load();
-				build();
+				if (this.minecraft != null && this.minecraft.screen == this) {
+					build();
+				}
 			} else {
 				seenState = store.dia();
 				baseRev = seenState.config.rev;
@@ -501,59 +288,23 @@ public final class DiaDashboardScreen extends TipScreen {
 	public void render(PoseStack ps, int mouseX, int mouseY, float partialTick) {
 		this.renderBackground(ps);
 		drawCenteredString(ps, this.font, this.title, this.width / 2, 8, 0xFFFFFF);
-		final int x = x0 + LIST_W + 10;
-		if (tab == Tab.ROUTES) {
-			final Topology.Route r = route(selectedRoute);
-			if (r != null) {
-				drawString(ps, this.font, this.font.plainSubstrByWidth(routeName(r.name), W - LIST_W - 10), x, 38, 0xFFFFFF);
-				final DiaModel.RouteSetting s = working.route(r.id);
-				if (s != null && s.custom) {
-					drawString(ps, this.font, "回復運転 +km/h", x, 102, 0xA0A0A0);
-					drawString(ps, this.font, "上限 km/h", x, 124, 0xA0A0A0);
-					drawString(ps, this.font, "遅れ 秒", x, 146, 0xA0A0A0);
-				}
-			}
-		} else if (tab == Tab.DEPOTS) {
-			final Topology.Depot d = depot(selectedDepot);
-			if (d != null) {
-				drawString(ps, this.font, this.font.plainSubstrByWidth(nm(d.name), W - LIST_W - 10), x, 38, 0xFFFFFF);
-				renderDepotInfo(ps, d, x);
-			}
-		} else {
-			final String[] labels = {"最小間隔", "ドア最短", "待避の上限", "余裕 秒", "余裕 %"};
-			for (int i = 0; i < labels.length; i++) {
-				drawString(ps, this.font, labels[i], x0, 56 + i * 24, 0xFFFFFF);
-			}
+		final int px = x0 + LIST_W + GAP;
+		final int pw = w0 - LIST_W - GAP;
+		if (pw >= 120) {
+			drawString(ps, this.font, "最小間隔 秒", px, 28, 0xA0A0A0);
+			drawString(ps, this.font, "ドア最短 秒", px, 48, 0xA0A0A0);
+			DiaDiag.draw(ps, this.font, preview(), working, store.topology(), px, 70, pw, this.height - 70 - 34, 0);
 		}
 		if (!status.isEmpty()) {
-			drawCenteredString(ps, this.font, this.font.plainSubstrByWidth(status, W), this.width / 2, this.height - 40, statusColor);
+			drawCenteredString(ps, this.font, this.font.plainSubstrByWidth(status, w0), this.width / 2, this.height - 38, statusColor);
 		}
 		super.render(ps, mouseX, mouseY, partialTick);
 		renderTips(ps, mouseX, mouseY);
 	}
 
-	private void renderDepotInfo(PoseStack ps, Topology.Depot d, int x) {
-		if (!isDepotCustom(d)) {
-			return;
-		}
-		final DiaPlanner.Result plan = preview();
-		final List<DiaModel.Run> runs = plan.runs.get(d.id);
-		if (runs == null || runs.isEmpty()) {
-			drawString(ps, this.font, "時刻表なし", x, 76, 0xFFAA00);
-			return;
-		}
-		final DiaModel.Run first = runs.get(0);
-		final DiaModel.Run last = runs.get(runs.size() - 1);
-		drawString(ps, this.font, runs.size() + "本", x, 76, 0xA0A0A0);
-		drawString(ps, this.font, DiaModel.hms(first.depotDep).substring(0, 5) + " - " + DiaModel.hms(last.depotDep).substring(0, 5), x, 88, 0xA0A0A0);
-		if (!plan.warnings.isEmpty()) {
-			drawString(ps, this.font, "§6! " + this.font.plainSubstrByWidth(plan.warnings.get(0), W - LIST_W - 28), x, 104, 0xFFAA00);
-		}
-	}
-
 	@Override
 	public boolean mouseScrolled(double mouseX, double mouseY, double amount) {
-		if (tab != Tab.SETTINGS && mouseX < x0 + LIST_W) {
+		if (mouseX < x0 + LIST_W) {
 			page = Math.max(0, page + (amount < 0 ? 1 : -1));
 			build();
 			return true;
