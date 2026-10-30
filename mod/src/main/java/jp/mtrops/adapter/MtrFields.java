@@ -19,8 +19,8 @@ import java.util.UUID;
  *   Train.ridingEntities       protected final Set<UUID>
  *   TrainServer.timeSegments   private final List<Siding.TimeSegment>
  *   TrainServer.routeId        private long
- *   Train.elapsedDwellTicks    protected float            (カスタムダイヤの発車時刻合わせ)
- *   TrainServer.trainPositions private List<Map<UUID, Long>>(カスタムダイヤのATC: 前方の在線)
+ *   Train.elapsedDwellTicks    protected float            
+ *   TrainServer.trainPositions private List<Map<UUID, Long>>
  *
  * フィールドが見つからない場合(別バージョンのMTR)は missing に名前を残し、
  * MtrAdapter.selfCheck() が起動時にログへ出す。推測で別の経路を使うことはしない。

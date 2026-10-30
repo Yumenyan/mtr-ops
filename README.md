@@ -24,12 +24,11 @@ MTRmod 3.2.2-hotfix-1 / Minecraft 1.19.2 / Fabric 用。サーバーが車庫・
 - `GET /api/routes/{路線ID}` 路線の駅順・駅間距離・累積距離・線形(`?points=0` で線形なし)
 - `GET /api/distance?from=駅ID&to=駅ID[&route=路線ID]` 2駅間の線路沿い距離。`route` 指定でその路線の停車順に沿って合計、無指定は区間グラフの最短経路
 - 線形は、サーバーが走行中の列車の経路(PathData)から少しずつ集めます(約5秒おきに3列車ずつ)。まだ列車が走っていない区間は `"measured":false` で、駅の座標の直線距離で補います。
-- `GET /api/schedule/{駅}` 駅の時刻表(2時間先まで、`?hours=` で変更)。駅はID・英名・和名で指定(例 `/api/schedule/nagaumi`)。走行中の列車は到着予想、まだ出庫していない列車は車庫の出庫時刻 + 所要時間から推定、カスタムダイヤは時刻表
+- `GET /api/schedule/{駅}` 駅の時刻表(2時間先まで、`?hours=` で変更)。駅はID・英名・和名で指定(例 `/api/schedule/nagaumi`)。走行中の列車は到着予想、まだ出庫していない列車は車庫の出庫時刻 + 所要時間から推定
 - `GET /api/runtimes` 駅間ごとの所要時間(MTRの理論値の走行・停車、実測の平均、見込み)。`/api/sections` `/api/routes/{id}` にも `runtime` が付きます
 - `GET /api/rails`(`/api/geometry/rails`)レール1本ごとの形と種別(`mode`=train/boat/cable_car/airplane、`type`=MTRのRailType、`role`=line/platform/siding/turn_back 等)。`/api/geometry` の区間にも `mode` と `parts`(種別ごとの区切り)が付きます
 - 列車の `etas`(到着予想)は折り返し後の路線も含み、既定で20分先まで(`?etaHorizon=秒`)。MTRの発車標と同じ計算を、駅間ごとの実績で補正しています
 - 停車しない列車(通過)も、`/api/schedule/駅` の `"pass":true` と、列車の `etas` の `pass` で取れます(発車標からは `passCount` などのメソッド)
-- `GET /api/dia` ダイヤ編成ツールの設定・時刻表・詰まり/待避の診断(読み取りのみ)
 - そのほか `/api/live` `/api/trains` `/api/stations` など。ID はすべて文字列です。
 
 ## 車番(編成番号)の付け方
@@ -52,9 +51,6 @@ MTRmod 3.2.2-hotfix-1 / Minecraft 1.19.2 / Fabric 用。サーバーが車庫・
 - MTR内部はリフレクションで参照。MTRバージョンが違うと起動時 selfCheck が警告します。
 - 遅延は再起動直後は0から。車両ごとの任意番号はGUIでは未編集(編成ID-Nで自動採番)。
 - 専用サーバー側HTTPは未実装(クライアント側のみ)。
-
-## ダイヤ編成ツール(発車時刻の定義)
-アイテム「ダイヤ編成ツール」(MTRの鉄道ダッシュボード + 時計でクラフト)で、路線のホームごとの発車時刻をゲーム内で決めます。MTRの停車時間に依存せず、種別ごとの発車時刻・発車時刻単位の待避を実現し、詰まる所・待避できる所をリアルタイムに案内します。詳しくは `docs/CUSTOM_DIA.md`。
 
 ## Webアプリ(v2)
 東京メトロmy!アプリをPC向けにしたデザインです。ホーム(路線シンボルの選択 → 運行状況 → 横型の列車位置)、路線一覧、車両、スタック調査、設定。

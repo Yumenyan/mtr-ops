@@ -33,7 +33,6 @@ import java.util.function.Function;
  * GET /api/runtimes      駅間ごとの所要時間(MTRの理論値・走行・停車・実績)
  * GET /api/schedule/{駅} 駅の時刻表(出庫予定と所要時間の推定から。?hours=2)。駅はID・英名・和名で指定(例 nagaumi)
  * GET /api/rails         レールの形と種別(鉄道/船/ケーブルカー/飛行機、本線/ホーム/車庫線/折返し 等)。/api/geometry/rails も同じ
- * GET /api/dia           ダイヤ編成ツールの設定・路線ごとの時刻表(?route=ID で便を含める)・詰まり/待避の診断・運行中の列車の便と遅れ(読み取りのみ。編集はゲーム内のダイヤ編成ツール)
  * 列車の etas(到着予想)は折り返し後の路線も含む。既定は20分先まで(?etaHorizon=秒 で変更、最大7200)
  *
  * IDはJavaScriptで精度が落ちるため、すべて文字列で返す。
@@ -164,8 +163,6 @@ public final class ApiHandler {
 				case "/api/rails":
 				case "/api/geometry/rails":
 					return ok(RailNetwork.toJson(store.rails(), q));
-				case "/api/dia":
-					return ok(dia(q));
 				case "/api/schedule":
 					if (q.get("station") == null) {
 						return new Response(400, error("station を指定してください(例 /api/schedule/nagaumi または ?station=駅ID)"));
@@ -229,7 +226,6 @@ public final class ApiHandler {
 		w.field("snapshotAgeMs", s == null ? -1 : age);
 		w.field("topologyRev", store.topology().rev);
 		w.field("geometryRev", store.geometry().rev);
-		w.field("customDia", !store.dia().customDepots.isEmpty());
 		w.field("scheduleReceived", store.schedule().received);
 		w.field("geometrySections", store.geometry().sections.size());
 		if (s != null) {
@@ -610,25 +606,21 @@ public final class ApiHandler {
 	// ------------------------------------------------------------------ 駅間の所要時間
 
 	private ScheduleSync.State cachedSchedule;
-	private DiaSync.State cachedDia;
 	private Map<String, double[]> idealRuns = new HashMap<>();
 	private Map<Long, String> platformNames = new HashMap<>();
 	private Map<Long, Double> platformDwell = new HashMap<>();
 
-	/** 全車庫の理想走行(時刻表API用の同期 + カスタムダイヤの同期)から、駅間の走行・停車時間とホーム名を引く表を作る。 */
+	/** 全車庫の理想走行(時刻表API用の同期)から、駅間の走行・停車時間とホーム名を引く表を作る。 */
 	private synchronized Map<String, double[]> idealRuns() {
 		final ScheduleSync.State ss = store.schedule();
-		final DiaSync.State ds = store.dia();
-		if (ss != cachedSchedule || ds != cachedDia) {
+		if (ss != cachedSchedule) {
 			cachedSchedule = ss;
-			cachedDia = ds;
-			final Map<Long, DiaModel.Profile> all = new java.util.LinkedHashMap<>(ss.profiles);
-			ds.profiles.forEach(all::putIfAbsent);
+			final Map<Long, IdealRun.Profile> all = new java.util.LinkedHashMap<>(ss.profiles);
 			idealRuns = ScheduleSync.idealRunTimes(all);
 			final Map<Long, String> names = new HashMap<>();
 			final Map<Long, Double> dwell = new HashMap<>();
-			for (final DiaModel.Profile p : all.values()) {
-				for (final DiaModel.Stop st : p.stops) {
+			for (final IdealRun.Profile p : all.values()) {
+				for (final IdealRun.Stop st : p.stops) {
 					names.putIfAbsent(st.platformId, st.platform);
 					if (!st.pass) {
 						dwell.putIfAbsent(st.platformId, Math.max(0, st.dep - st.arr));
@@ -789,7 +781,6 @@ public final class ApiHandler {
 		long platformId;
 		long routeId;
 		long depotId;
-		boolean custom;
 		boolean pass;
 		TrainView train;
 	}
@@ -811,7 +802,6 @@ public final class ApiHandler {
 		final long until = now + (long) (hours * 3600_000L);
 		final List<Ent> list = new ArrayList<>();
 		final ScheduleSync.State ss = store.schedule();
-		final DiaSync.State ds = store.dia();
 
 		// 1. 走っている列車(到着予想。折り返し後の路線も含む)
 		final Snapshot snap = store.live();
@@ -839,7 +829,6 @@ public final class ApiHandler {
 					x.platformId = e.platformId;
 					x.routeId = e.routeId != 0 ? e.routeId : v.s.routeId;
 					x.depotId = v.s.depotId;
-					x.custom = ds.plan.runs.containsKey(x.routeId);
 					x.train = v;
 					list.add(x);
 				}
@@ -848,14 +837,14 @@ public final class ApiHandler {
 
 		// 2. これから出庫する列車(MTRの車庫の出庫時刻 + 理想走行を実績で補正した所要時間)
 		for (final Map.Entry<Long, long[]> e : ss.deploys.entrySet()) {
-			final DiaModel.Profile prof = ss.profiles.get(e.getKey());
+			final IdealRun.Profile prof = ss.profiles.get(e.getKey());
 			if (prof == null) {
 				continue;
 			}
 			final double[] off = calibratedOffsets(prof, ss.stats);
 			for (int k = 0; k < prof.stops.size(); k++) {
-				final DiaModel.Stop stop = prof.stops.get(k);
-				if (stop.pass || stop.stationId != st.id || ds.plan.runs.containsKey(stop.routeId)) {
+				final IdealRun.Stop stop = prof.stops.get(k);
+				if (stop.pass || stop.stationId != st.id) {
 					continue; // ダイヤ運転の路線は時刻表から
 				}
 				for (final long t0 : e.getValue()) {
@@ -874,68 +863,13 @@ public final class ApiHandler {
 			}
 		}
 
-		// 3. ダイヤ運転の路線は時刻表どおり(まだ始発を出ていない便)
-		if (ds.received) {
-			final java.util.Set<String> running = new java.util.HashSet<>();
-			for (final DiaRuntime.View v : store.diaLive().trains) {
-				running.add(v.routeId + "#" + v.no);
-			}
-			for (final Map.Entry<Long, List<DiaModel.Run>> re : ds.plan.runs.entrySet()) {
-				final DiaPlanner.RouteInfo ri = ds.plan.info.get(re.getKey());
-				if (ri == null) {
-					continue;
-				}
-				for (final DiaModel.Run r : re.getValue()) {
-					if (running.contains(r.key()) || diaMillis(r.originDep, now, ds.utcOffset) < now) {
-						continue;
-					}
-					for (int k = 0; k < ri.stops.size() && k < r.arr.length; k++) {
-						final DiaModel.Stop stop = ri.stops.get(k);
-						if (stop.stationId != st.id) {
-							continue;
-						}
-						final Ent x = new Ent();
-						x.kind = "planned";
-						x.arr = diaMillis(r.arr[k], now, ds.utcOffset);
-						if (x.arr < now || x.arr > until) {
-							continue;
-						}
-						x.dep = diaMillis(r.dep[k], now, ds.utcOffset);
-						x.sched = x.arr;
-						x.platformId = stop.platformId;
-						x.routeId = stop.routeId;
-						x.custom = true;
-						list.add(x);
-					}
-					for (int m = 0; m < r.passPlatform.length; m++) {
-						final DiaModel.Stop ps = passStop(ri, r.passPlatform[m]);
-						if (ps == null || ps.stationId != st.id) {
-							continue;
-						}
-						final Ent x = new Ent();
-						x.kind = "planned";
-						x.pass = true;
-						x.arr = diaMillis(r.passTime[m], now, ds.utcOffset);
-						if (x.arr < now || x.arr > until) {
-							continue;
-						}
-						x.dep = x.arr;
-						x.sched = x.arr;
-						x.platformId = ps.platformId;
-						x.routeId = ps.routeId;
-						x.custom = true;
-						list.add(x);
-					}
-				}
-			}
-		}
 		list.sort(java.util.Comparator.comparingLong(x -> x.arr));
 
 		final JsonWriter w = new JsonWriter();
 		w.beginObject().field("ok", true);
 		w.idField("stationId", st.id).field("station", st.name).field("slug", stationSlug(st.name));
 		w.field("now", now).field("hours", hours, 2);
-		w.field("note", "kind=live は走行中の列車の到着予想(折り返し後も含む)、planned は車庫の出庫予定と所要時間からの推定(カスタムダイヤは時刻表)。時刻はこの端末の時計");
+		w.field("note", "kind=live は走行中の列車の到着予想(折り返し後も含む)、planned は車庫の出庫予定と所要時間からの推定。時刻はこの端末の時計");
 		w.name("departures").beginArray();
 		for (final Ent x : list) {
 			w.beginObject();
@@ -972,7 +906,6 @@ public final class ApiHandler {
 			if (d != null) {
 				w.field("depotName", d.name);
 			}
-			w.field("custom", x.custom);
 			if (x.train != null) {
 				final TrainSample s = x.train.s;
 				w.idField("trainId", s.id);
@@ -992,25 +925,14 @@ public final class ApiHandler {
 		return w.toString();
 	}
 
-	private static DiaModel.Stop passStop(DiaPlanner.RouteInfo ri, long platformId) {
-		for (final List<DiaModel.Stop> l : ri.passes) {
-			for (final DiaModel.Stop p : l) {
-				if (p.platformId == platformId) {
-					return p;
-				}
-			}
-		}
-		return null;
-	}
-
 	/** 車庫を出てから各停車駅に着くまでの秒(理想走行を、駅間ごとの実績比率で伸ばす)。通過駅は前の駅と同じ値。 */
-	private static double[] calibratedOffsets(DiaModel.Profile prof, SectionStats stats) {
+	private static double[] calibratedOffsets(IdealRun.Profile prof, SectionStats stats) {
 		final double[] off = new double[prof.stops.size()];
 		double prevArr = 0;
 		double prevOff = 0;
 		long prevSt = 0;
 		for (int k = 0; k < off.length; k++) {
-			final DiaModel.Stop s = prof.stops.get(k);
+			final IdealRun.Stop s = prof.stops.get(k);
 			if (s.pass) {
 				off[k] = prevOff + (s.arr - prevArr);
 				continue;
@@ -1024,19 +946,6 @@ public final class ApiHandler {
 		return off;
 	}
 
-	/** カスタムダイヤの「その日の秒」(サーバーのタイムゾーン)→ UNIXミリ秒(今に一番近い日付)。 */
-	static long diaMillis(int daySec, long nowMillis, int utcOffset) {
-		final long localNow = nowMillis / 1000 + utcOffset;
-		final long dayStart = Math.floorDiv(localNow, DiaModel.DAY) * DiaModel.DAY;
-		long t = dayStart + daySec;
-		if (t - localNow > DiaModel.DAY / 2) {
-			t -= DiaModel.DAY;
-		} else if (localNow - t > DiaModel.DAY / 2) {
-			t += DiaModel.DAY;
-		}
-		return (t - utcOffset) * 1000;
-	}
-
 	private static String hhmmss(long millis) {
 		return java.time.LocalTime.ofInstant(java.time.Instant.ofEpochMilli(millis), java.time.ZoneId.systemDefault()).withNano(0).toString();
 	}
@@ -1046,112 +955,6 @@ public final class ApiHandler {
 			return s == null ? def : Integer.parseInt(s.trim());
 		} catch (NumberFormatException e) {
 			return def;
-		}
-	}
-
-	// ------------------------------------------------------------------ カスタムダイヤ(読み取りのみ)
-
-	private String dia(Map<String, String> q) {
-		final DiaSync.State st = store.dia();
-		final DiaSync.Live live = store.diaLive();
-		final Topology t = store.topology();
-		final long only = q.containsKey("route") ? JsonReader.lng(q.get("route"), -1) : -1;
-		final boolean allRuns = "all".equals(q.get("runs"));
-		final JsonWriter w = new JsonWriter().beginObject();
-		w.field("ok", true);
-		w.field("received", st.received);
-		w.field("zone", st.zone);
-		w.field("utcOffset", st.utcOffset);
-		double now = Double.NaN;
-		if (live.receivedMillis > 0) {
-			now = (live.serverNow + (System.currentTimeMillis() - live.receivedMillis) / 1000.0) % DiaModel.DAY;
-		} else if (st.received) {
-			now = Math.floorMod(System.currentTimeMillis() / 1000L + st.utcOffset, (long) DiaModel.DAY);
-		}
-		if (!Double.isNaN(now)) {
-			w.field("serverNow", now, 1);
-		}
-		w.name("settings");
-		DiaJson.writeConfig(w, st.config);
-		w.name("customRoutes").beginArray();
-		for (final DiaModel.RouteSetting r : st.config.routes.values()) {
-			if (r.custom) {
-				w.value(Long.toString(r.routeId));
-			}
-		}
-		w.endArray();
-		w.name("routes").beginArray();
-		for (final Map.Entry<Long, DiaPlanner.RouteInfo> e : st.plan.info.entrySet()) {
-			final DiaPlanner.RouteInfo ri = e.getValue();
-			if (only != -1 && only != e.getKey()) {
-				continue;
-			}
-			w.beginObject();
-			w.idField("routeId", e.getKey());
-			w.name("stops").beginArray();
-			for (int i = 0; i < ri.stops.size(); i++) {
-				final DiaModel.Stop s = ri.stops.get(i);
-				w.beginObject().field("i", i).idField("stationId", s.stationId).idField("platformId", s.platformId)
-						.field("station", s.station).field("platform", s.platform)
-						.field("estRun", ri.estRun[i], 1).field("dwell", ri.dwell[i], 1)
-						.field("offset", st.plan.offset(st.config, e.getKey(), i)).endObject();
-			}
-			w.endArray();
-			final List<DiaModel.Run> runs = st.plan.runs.get(e.getKey());
-			if (runs != null) {
-				w.field("runCount", runs.size());
-				if (allRuns || only == e.getKey()) {
-					w.name("runs").beginArray();
-					for (final DiaModel.Run r : runs) {
-						w.beginObject().field("no", r.no).field("originDep", DiaModel.hms(r.originDep));
-						w.name("arr").beginArray();
-						for (final int x : r.arr) {
-							w.value(DiaModel.hms(x));
-						}
-						w.endArray().name("dep").beginArray();
-						for (final int x : r.dep) {
-							w.value(DiaModel.hms(x));
-						}
-						w.endArray().endObject();
-					}
-					w.endArray();
-				}
-			}
-			w.endObject();
-		}
-		w.endArray();
-		w.name("issues").beginArray();
-		for (final DiaModel.Issue is : st.plan.issues) {
-			w.beginObject().field("kind", is.kind == 0 ? "info" : "problem").field("type", issueName(is.sub));
-			w.idField("stationId", is.stationId).field("station", is.station).field("platform", is.platform);
-			w.idField("routeA", is.routeA).idField("routeB", is.routeB);
-			w.field("time", DiaModel.hms(is.time)).field("amount", is.amount).field("more", is.more).endObject();
-		}
-		w.endArray();
-		w.name("warnings").beginArray();
-		st.plan.warnings.forEach(w::value);
-		w.endArray();
-		w.name("live").beginArray();
-		for (final DiaRuntime.View v : live.trains) {
-			w.beginObject().idField("trainId", v.trainId).idField("routeId", v.routeId).field("no", v.no).field("lastStop", v.lastStop).field("delay", v.delay).endObject();
-		}
-		w.endArray();
-		w.endObject();
-		return w.toString();
-	}
-
-	private static String issueName(int sub) {
-		switch (sub) {
-			case DiaModel.Issue.PLATFORM:
-				return "platform";
-			case DiaModel.Issue.OVERTAKE:
-				return "overtake";
-			case DiaModel.Issue.SIDING:
-				return "siding";
-			case DiaModel.Issue.SHORT_TIME:
-				return "shortTime";
-			default:
-				return "headway";
 		}
 	}
 
@@ -1230,7 +1033,7 @@ public final class ApiHandler {
 
 	private static final ThreadLocal<Integer> ETA_HORIZON = ThreadLocal.withInitial(() -> 1200);
 
-	/** 到着予想(折り返し後の路線も含む)。既定は20分先まで(etaHorizon)。カスタムダイヤは時刻表の到着(scheduled)も出す。 */
+	/** 到着予想(折り返し後の路線も含む)。既定は20分先まで(etaHorizon)。 */
 	private void writeEtas(JsonWriter w, TrainView v) {
 		final List<EtaCodec.Entry> list = store.etasOf(v.s.id);
 		if (list.isEmpty()) {

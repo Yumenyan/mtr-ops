@@ -6,9 +6,9 @@ package jp.mtrops.core;
  *
  * 入力は経路(PathData)を単純化した配列。tick 単位で返す(20tick = 1秒)。
  */
-public final class DiaRailTime {
+public final class RailTime {
 
-	private DiaRailTime() {
+	private RailTime() {
 	}
 
 	/** 経路の1要素(PathData 1つ分)。 */

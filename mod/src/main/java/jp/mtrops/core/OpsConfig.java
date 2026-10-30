@@ -46,10 +46,6 @@ public final class OpsConfig {
 	/** true の場合、車庫台帳の編集にOP権限(レベル2)が必要。false なら MTR と同じ(クリエイティブ/サバイバル)。 */
 	public boolean requireOpToEdit = false;
 
-	// ---- カスタムダイヤ ----
-	/** 時刻表の時刻の基準にするタイムゾーン(例: "Asia/Tokyo")。空ならサーバーの既定。 */
-	public String timeZone = "";
-
 	// ---- ローカルHTTP ----
 	public boolean httpEnabled = true;
 	public int httpPort = 8765;

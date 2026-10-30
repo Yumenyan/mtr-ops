@@ -4,10 +4,9 @@ import io.netty.buffer.Unpooled;
 import jp.mtrops.ConfigLoader;
 import jp.mtrops.Net;
 import jp.mtrops.adapter.MtrAdapter;
-import jp.mtrops.adapter.DiaAdapter;
+import jp.mtrops.adapter.ScheduleAdapter;
 import jp.mtrops.core.AnomalyDetector;
-import jp.mtrops.core.DiaModel;
-import jp.mtrops.core.DiaRuntime;
+import jp.mtrops.core.IdealRun;
 import jp.mtrops.core.EtaCodec;
 import jp.mtrops.core.EtaPlanner;
 import jp.mtrops.core.ScheduleSync;
@@ -74,7 +73,6 @@ public final class OpsServer {
 	public static void stop() {
 		if (instance != null) {
 			instance.saved.setDirty();
-			instance.dia.stop();
 		}
 		instance = null;
 	}
@@ -101,10 +99,8 @@ public final class OpsServer {
 	private final java.util.Map<String, Geometry.Section> sectionMap = new java.util.LinkedHashMap<>();
 	private List<byte[]> geometryParts = new ArrayList<>();
 	private int geometryRev;
-	private final DiaServer dia;
 	private byte[] scheduleBytes;
 	private int etaSeq;
-	private long lastDiaErrorTick = -100000;
 	private long lastSectionsSave;
 
 	/** 列車ごとの「最後に着いた停車駅」(駅間の所要時間の実績を取るため) */
@@ -114,10 +110,6 @@ public final class OpsServer {
 		/** その駅に着いた時点での、次の停車駅とMTRの理論上の所要時間(tick) */
 		long nextStation;
 		double nextIdeal = Double.NaN;
-		/** 駅を出た時刻(tick)と、そのときのMTRの理論上の次駅までの走行(tick)。出ていなければ 0 */
-		long departTick;
-		long runStation;
-		double runIdeal;
 	}
 
 	private final java.util.Map<Long, StopTrack> stopTracks = new java.util.HashMap<>();
@@ -130,24 +122,6 @@ public final class OpsServer {
 		this.registry.skipEndings = new java.util.HashSet<>(cfg.skipNumberEndings);
 		this.assigner = new FormationAssigner(registry);
 		this.detector = new AnomalyDetector(cfg);
-		this.dia = new DiaServer(server, cfg, saved);
-		this.dia.setBroadcaster(bytes -> {
-			for (final ServerPlayer p : subscribedPlayers()) {
-				sendDia(p, bytes);
-			}
-		});
-	}
-
-	public DiaServer dia() {
-		return dia;
-	}
-
-	private static void sendDia(ServerPlayer p, byte[] bytes) {
-		if (bytes.length > Net.MAX_S2C_BYTES) {
-			LOGGER.error("カスタムダイヤのデータが大きすぎて同期できません ({} bytes)", bytes.length);
-			return;
-		}
-		send(p, Net.DIA, bytes);
 	}
 
 	public OpsConfig config() {
@@ -171,7 +145,6 @@ public final class OpsServer {
 			send(player, Net.GEOMETRY, part);
 		}
 		if (adapterOk) {
-			sendDia(player, dia.syncBytes());
 			if (scheduleBytes == null) {
 				try {
 					refreshSchedule();
@@ -182,26 +155,6 @@ public final class OpsServer {
 				send(player, Net.SCHEDULE, scheduleBytes);
 			}
 		}
-	}
-
-	/** ダイヤ編成ツールを使った。最新のダイヤを送ってから画面を開かせる(編集できるかも伝える。保存時にもサーバーで確認する)。 */
-	public void openDiaDashboard(ServerPlayer player) {
-		try {
-			openDiaDashboardInner(player);
-		} catch (RuntimeException | LinkageError e) {
-			LOGGER.error("ダイヤ編成ツールを開けませんでした: {}", e.toString(), e);
-		}
-	}
-
-	private void openDiaDashboardInner(ServerPlayer player) {
-		if (!adapterOk) {
-			player.displayClientMessage(net.minecraft.network.chat.Component.literal("mtrops: MTR の列車情報にアクセスできないため、ダイヤは使えません"), false);
-			return;
-		}
-		sendDia(player, dia.syncBytes());
-		final FriendlyByteBuf buf = PacketByteBufs.create();
-		buf.writeBoolean(canEdit(player));
-		ServerPlayNetworking.send(player, Net.OPEN_DIA, buf);
 	}
 
 	public void unsubscribe(ServerPlayer player) {
@@ -229,15 +182,6 @@ public final class OpsServer {
 		if (!adapterOk) {
 			return;
 		}
-		// カスタムダイヤは見ている人がいなくても常に動かす(列車の動きそのものなので)
-		try {
-			dia.tick();
-		} catch (RuntimeException | LinkageError e) {
-			if (tickCount - lastDiaErrorTick > 1200) {
-				lastDiaErrorTick = tickCount;
-				LOGGER.error("カスタムダイヤの処理で例外が発生しました(サーバーは継続します): {}", e.toString(), e);
-			}
-		}
 		if (tickCount - lastSectionsSave > 6000) {
 			lastSectionsSave = tickCount;
 			saved.setDirty();
@@ -256,12 +200,6 @@ public final class OpsServer {
 		if (tickCount % 100 == 0) {
 			refreshTopology(false);
 			refreshGeometry();
-		}
-		if (tickCount % 40 == 0 && !dia.runtime().customDepots().isEmpty()) {
-			final byte[] live = dia.encodeLive();
-			for (final ServerPlayer p : subscribedPlayers()) {
-				send(p, Net.DIA_LIVE, live);
-			}
 		}
 		if (tickCount % 400 == 5) {
 			refreshSchedule();
@@ -288,7 +226,6 @@ public final class OpsServer {
 		}
 		processEtas(samples);
 		final AnomalyDetector.Result result = detector.update(tickCount, samples, present);
-		applyDiaDelays(result.views);
 
 		final Snapshot snap = new Snapshot();
 		snap.seq = ++seq;
@@ -314,10 +251,9 @@ public final class OpsServer {
 		}
 	}
 
-	// ------------------------------------------------------------------ 到着予想(実績での補正・カスタムダイヤ)
+	// ------------------------------------------------------------------ 到着予想(実績での補正)
 
 	private void processEtas(List<TrainSample> samples) {
-		final DiaRuntime rt = dia.runtime();
 		final java.util.Set<Long> seen = new HashSet<>();
 		final long nowMillis = System.currentTimeMillis();
 		for (final TrainSample s : samples) {
@@ -326,17 +262,12 @@ public final class OpsServer {
 				stopTracks.remove(s.id);
 				continue;
 			}
-			final boolean custom = rt.isCustomDepot(s.depotId);
 			StopTrack tr = stopTracks.get(s.id);
 			if (s.atStop && s.curStationId != 0) {
 				final long arriveTick = tickCount - (long) s.elapsedDwellTicks;
-				if (tr != null && tr.station != s.curStationId && tr.departTick > 0 && tr.runStation == s.curStationId && tr.runIdeal > 0) {
-					// 走行時間(停車を除く)の実績。カスタムダイヤの列車も含める(待たされる時間を含まないので)
-					saved.runs.add(tr.station, s.curStationId, (arriveTick - tr.departTick) / 20.0, tr.runIdeal / 20.0, nowMillis);
-				}
 				if (tr == null || tr.station != s.curStationId) {
-					// 新しい駅に着いた: 前の駅からの実績を記録(カスタムダイヤの列車は時刻調整で待つので記録しない)
-					if (tr != null && !custom && tr.nextStation == s.curStationId && !Double.isNaN(tr.nextIdeal)) {
+					// 新しい駅に着いた: 前の駅からの実績を記録
+					if (tr != null && tr.nextStation == s.curStationId && !Double.isNaN(tr.nextIdeal)) {
 						saved.sections.add(tr.station, s.curStationId, (arriveTick - tr.arriveTick) / 20.0, tr.nextIdeal / 20.0, nowMillis);
 					}
 					tr = new StopTrack();
@@ -355,53 +286,21 @@ public final class OpsServer {
 					}
 				}
 			}
-			if (!s.atStop && tr != null && tr.departTick == 0) {
-				for (int k = 0; k < s.etaStationIds.length; k++) {
-					if (k < s.etaPass.length && s.etaPass[k]) {
-						continue;
-					}
-					tr.departTick = tickCount;
-					tr.runStation = s.etaStationIds[k];
-					tr.runIdeal = s.etaIdealTicks[k];
-					break;
-				}
-			}
 			final long last = s.atStop && s.curStationId != 0 ? s.curStationId : tr != null ? tr.station : s.prevStationId;
 			EtaPlanner.calibrate(s, last, saved.sections);
-			if (custom) {
-				final DiaRuntime.Assign a = rt.assignOf(s.id);
-				if (a != null) {
-					final DiaModel.Run run = rt.plan().find(a.routeId, a.no);
-					final DiaModel.Stop here = s.atStop ? rt.stopAt(s.depotId, s.nextStopIndex) : null;
-					EtaPlanner.applyTimetable(s, rt.plan().info.get(a.routeId), run, a.lastStop, here == null ? -1 : here.stationIndex, dia.nowSec(), rt.config().minOpen);
-				}
-			}
 		}
 		stopTracks.keySet().retainAll(seen);
-	}
-
-	/** カスタムダイヤの列車は、時刻表に対する遅れ(秒)を遅延として出す。 */
-	private void applyDiaDelays(List<TrainView> views) {
-		final DiaRuntime rt = dia.runtime();
-		if (rt.customDepots().isEmpty()) {
-			return;
-		}
-		for (final TrainView v : views) {
-			if (rt.isCustomDepot(v.s.depotId) && rt.assignOf(v.s.id) != null) {
-				v.delaySec = Math.max(0, rt.delayOf(v.s.id));
-			}
-		}
 	}
 
 	// ------------------------------------------------------------------ 時刻表API用の同期
 
 	/** 全車庫の理想走行。1回の計算が重い(1tickずつ走行を再現する)ので、1回に数車庫ずつ作り、数分おきに全部作り直す。 */
-	private final java.util.Map<Long, DiaModel.Profile> scheduleProfiles = new java.util.LinkedHashMap<>();
+	private final java.util.Map<Long, IdealRun.Profile> scheduleProfiles = new java.util.LinkedHashMap<>();
 	private final java.util.Set<Long> scheduleTried = new HashSet<>();
 	private long scheduleProfilesBuilt;
 
 	private void refreshSchedule() {
-		final java.util.Set<Long> depots = DiaAdapter.depotRoutes(server).keySet();
+		final java.util.Set<Long> depots = ScheduleAdapter.depotRoutes(server).keySet();
 		if (tickCount - scheduleProfilesBuilt > 12000) {
 			scheduleProfilesBuilt = tickCount;
 			scheduleProfiles.clear();
@@ -416,11 +315,11 @@ public final class OpsServer {
 		}
 		if (!todo.isEmpty()) {
 			scheduleTried.addAll(todo); // 経路が無く作れなかった車庫も、次の全体の作り直しまで再計算しない
-			scheduleProfiles.putAll(DiaAdapter.buildProfiles(server, todo));
+			scheduleProfiles.putAll(ScheduleAdapter.buildProfiles(server, todo));
 		}
-		final java.util.Map<Long, DiaModel.Profile> profiles = scheduleProfiles;
+		final java.util.Map<Long, IdealRun.Profile> profiles = scheduleProfiles;
 		final long now = System.currentTimeMillis();
-		final java.util.Map<Long, List<Long>> deploys = DiaAdapter.upcomingDeploys(server, now, 3L * 3600_000L);
+		final java.util.Map<Long, List<Long>> deploys = ScheduleAdapter.upcomingDeploys(server, now, 3L * 3600_000L);
 		scheduleBytes = ScheduleSync.encode(now, profiles, deploys, saved.sections, Net.MAX_S2C_BYTES);
 		for (final ServerPlayer p : subscribedPlayers()) {
 			send(p, Net.SCHEDULE, scheduleBytes);
@@ -503,38 +402,6 @@ public final class OpsServer {
 			sendResult(player, result.ordinal(), registry.lastError);
 			send(player, Net.REGISTRY, RegistryCodec.encodeRegistry(registry, false));
 		}
-	}
-
-	public void handleDiaUpdate(ServerPlayer player, int baseRev, byte[] deflated) {
-		try {
-			handleDiaUpdateInner(player, baseRev, deflated);
-		} catch (RuntimeException | LinkageError e) {
-			// プレイヤーの操作で例外が出てもサーバーは止めない
-			LOGGER.error("handleDiaUpdate で例外が発生しました: {}", e.toString(), e);
-			sendResult(player, Net.RESULT_BAD_PAYLOAD, "サーバーで処理できませんでした");
-		}
-	}
-
-	private void handleDiaUpdateInner(ServerPlayer player, int baseRev, byte[] deflated) {
-		if (!canEdit(player)) {
-			sendResult(player, Net.RESULT_NO_PERMISSION, "ダイヤを編集する権限がありません");
-			return;
-		}
-		final DiaModel.Config incoming;
-		try {
-			incoming = jp.mtrops.core.DiaCodec.decodeConfig(inflate(deflated, 4_000_000));
-		} catch (IOException | RuntimeException e) {
-			sendResult(player, Net.RESULT_BAD_PAYLOAD, "不正なデータです");
-			return;
-		}
-		final String err = dia.applyUpdate(incoming, baseRev);
-		if (err != null) {
-			sendResult(player, Net.RESULT_DIA_REJECTED, err);
-			sendDia(player, dia.syncBytes());
-			return;
-		}
-		LOGGER.info("{} がカスタムダイヤを更新しました (rev {})", player.getGameProfile().getName(), dia.config().rev);
-		sendResult(player, Net.RESULT_DIA_OK, "ダイヤを保存しました");
 	}
 
 	static byte[] inflate(byte[] data, int max) throws IOException {

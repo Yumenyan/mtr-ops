@@ -241,18 +241,6 @@ public class DevServer {
 				stats.add(l.sts.get(i - 1).id(), l.sts.get(i).id(), ideal * 1.15, ideal, System.currentTimeMillis());
 			}
 		}
-		// カスタムダイヤ(疑似): 港南車庫(港南線・空港線)の空港線をダイヤ管理にしたことにする
-		{
-			final DiaModel.Config dc = new DiaModel.Config();
-			final DiaModel.RouteSetting rs = new DiaModel.RouteSetting(); rs.routeId = l4.id; rs.custom = true;
-			dc.routes.put(l4.id, rs);
-			rs.table = DiaModel.Table.defaults();
-			rs.table.first = 5 * 3600; rs.table.periods.get(0).headway = 480;
-			final int utc = java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 1000;
-			final byte[] b = DiaSync.encode(java.util.TimeZone.getDefault().getID(), utc, dc, Map.of(depot2, profileOf(depot2, l4)), List.of(depot2), new HashMap<>());
-			store.setDia(DiaSync.decode(b));
-		}
-
 		long tick = 20 * 600; // ゲーム内時刻の見た目用
 		int seq = 0;
 		final long startNanos = System.nanoTime();
@@ -360,7 +348,7 @@ public class DevServer {
 
 	/** 時刻表API用の同期データ(疑似): 車庫ごとに最初の路線の理想走行と、6分ごとの出庫予定。 */
 	static byte[] scheduleSync(Map<Long, Line> depotLines, SectionStats stats) {
-		final Map<Long, DiaModel.Profile> profs = new LinkedHashMap<>();
+		final Map<Long, IdealRun.Profile> profs = new LinkedHashMap<>();
 		final Map<Long, List<Long>> deploys = new LinkedHashMap<>();
 		final long now = System.currentTimeMillis();
 		for (final Map.Entry<Long, Line> e : depotLines.entrySet()) {
@@ -373,13 +361,13 @@ public class DevServer {
 		return ScheduleSync.encode(now, profs, deploys, stats, 900_000);
 	}
 
-	static DiaModel.Profile profileOf(long depot, Line l) {
-		final DiaModel.Profile p = new DiaModel.Profile();
+	static IdealRun.Profile profileOf(long depot, Line l) {
+		final IdealRun.Profile p = new IdealRun.Profile();
 		p.depotId = depot;
 		double t = 60;
 		for (int i = 0; i < l.sts.size(); i++) {
 			if (i > 0) t += dist(l.sts.get(i - 1), l.sts.get(i)) / 15.0;
-			final DiaModel.Stop st = new DiaModel.Stop();
+			final IdealRun.Stop st = new IdealRun.Stop();
 			st.pathIndex = i * 3; st.stationId = l.sts.get(i).id(); st.platformId = st.stationId * 10 + l.id; st.routeId = l.id;
 			st.station = l.sts.get(i).name(); st.platform = Integer.toString(1 + (int) (l.id % 2)); st.stationIndex = i;
 			st.arr = t; st.dep = t + 15; t += 15;

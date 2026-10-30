@@ -68,7 +68,7 @@
   const S = {
     live: null, routes: [], stations: new Map(), routeMap: new Map(), formations: [], depots: [],
     ghosts: { suspects: [], past: [] }, topoRev: -1, ok: false, lastOk: 0, err: '', trains: new Map(), routeLive: new Map(),
-    groups: [], groupsRev: 0, ttCache: new Map(), dia: { routes: new Set(), depots: new Set() }, groupByRoute: new Map(), groupByKey: new Map(), selKey: '', zoom: false, distSel: '', distCache: new Map()
+    groups: [], groupsRev: 0, ttCache: new Map(), groupByRoute: new Map(), groupByKey: new Map(), selKey: '', zoom: false, distSel: '', distCache: new Map()
   };
   const route = id => S.routeMap.get(String(id));
   const station = id => S.stations.get(String(id));
@@ -346,7 +346,6 @@
     ['fleet', '車両一覧', '<rect x="3" y="6" width="18" height="10" rx="3"/><path d="M7 20l1-4M17 20l-1-4M3 11h18"/>'],
     ['ghost', 'スタック調査', '<path d="M5 20V10a7 7 0 0 1 14 0v10l-3-2-2 2-2-2-2 2-2-2z M9.5 11h.01 M14.5 11h.01"/>']
   ];
-  const isDiaGroup = g => g.members.some(m => S.dia.routes.has(String(m.id)));
   const metaOf = a => `${a.trainCount}本運行${a.maxDelaySec >= 60 ? ` ・最大${Math.round(a.maxDelaySec / 60)}分遅れ` : ''}`;
   const setChip = (el, k) => { const c = `chip s-${k}`; if (el.className !== c) el.className = c; const t = `${st(k).mark} ${st(k).short}`; if (el.textContent !== t) el.textContent = t; };
   const matchGroup = (g, q) => { const w = q.toLowerCase().trim().split(/[\s\u3000]+/).filter(Boolean); const text = (g.name + ' ' + g.members.map(m => `${m.name} ${m.number || ''}`).join(' ')).toLowerCase(); return w.every(x => text.includes(x)); };
@@ -358,10 +357,10 @@
       oninput: e => { HOME.q = e.target.value; for (const [k, it] of HOME.items) it.el.hidden = !matchGroup(S.groupByKey.get(k), HOME.q); } });
     const list = h('div', { class: 'llist', onscroll: e => { HOME.listScroll = e.target.scrollTop; } });
     for (const g of S.groups) {
-      const meta = h('small'), badge = h('span'), dia = h('span', { class: 'diatag', hidden: true }, 'ダイヤ');
+      const meta = h('small'), badge = h('span');
       const el = h('button', { class: 'litem', type: 'button', style: `--c:${g.color}`, hidden: !matchGroup(g, HOME.q), onclick: () => go('home', g.rep.id) },
-        lsym(g, 'md'), h('span', { class: 'ltx' }, h('b', null, g.name, dia), meta), badge);
-      HOME.items.set(g.key, { el, meta, badge, dia }); list.append(el);
+        lsym(g, 'md'), h('span', { class: 'ltx' }, h('b', null, g.name), meta), badge);
+      HOME.items.set(g.key, { el, meta, badge }); list.append(el);
     }
     HOME.list = list; HOME.main = h('div', { class: 'hmain' });
     HOME.root = h('div', { class: 'hsplit' }, h('aside', { class: 'lside' }, search, list), HOME.main);
@@ -372,7 +371,6 @@
       const it = HOME.items.get(g.key); if (!it) continue; const a = groupAgg(g);
       const m = metaOf(a); if (it.meta.textContent !== m) it.meta.textContent = m;
       setChip(it.badge, a.status);
-      it.dia.hidden = !isDiaGroup(g);
       it.el.classList.toggle('sel', g === sel);
     }
     if (HOME.lastSel !== sel.key) {
@@ -384,7 +382,7 @@
     const a = groupAgg(g);
     const sub = g.members.length > 1 ? `${g.members.length}系統をまとめて表示` : (g.rep.destination ? `${jp(g.rep.destination)}方面` : '');
     return h('div', null,
-      h('div', { class: 'lhead' }, lsym(g, 'xl'), h('div', { class: 'lname' }, g.name, isDiaGroup(g) ? h('span', { class: 'diatag big' }, 'ダイヤ運転') : null, sub ? h('small', null, sub) : null)),
+      h('div', { class: 'lhead' }, lsym(g, 'xl'), h('div', { class: 'lname' }, g.name, sub ? h('small', null, sub) : null)),
       h('div', { class: 'stat' },
         h('div', { class: 'stat-h' }, h('span', { class: `ring s-${a.status}` }), h('b', null, st(a.status).label), a.status === 'normal' ? null : chip(a.status)),
         h('p', null, statusText(g, a)),
@@ -426,10 +424,10 @@
     LINES.note = h('div', { class: 'nodata' });
     const grid = h('div', { class: 'grid' });
     for (const g of S.groups) {
-      const meta = h('small'), badge = h('span'), dia = h('span', { class: 'diatag', hidden: true }, 'ダイヤ');
+      const meta = h('small'), badge = h('span');
       const el = h('button', { class: 'lcard', type: 'button', style: `--c:${g.color}`, onclick: () => go('home', g.rep.id) },
-        lsym(g, 'md'), h('span', { class: 'tx' }, h('b', null, g.name, dia), meta), badge);
-      LINES.items.set(g.key, { el, meta, badge, dia }); grid.append(el);
+        lsym(g, 'md'), h('span', { class: 'tx' }, h('b', null, g.name), meta), badge);
+      LINES.items.set(g.key, { el, meta, badge }); grid.append(el);
     }
     LINES.root = h('div', null, input, LINES.pills, LINES.note, grid); LINES.rev = S.groupsRev;
   }
@@ -440,7 +438,6 @@
       const it = LINES.items.get(g.key); if (!it) continue; const a = groupAgg(g);
       const m = `${g.members.length > 1 ? g.members.length + '系統 ・ ' : ''}${metaOf(a)}`; if (it.meta.textContent !== m) it.meta.textContent = m;
       setChip(it.badge, a.status);
-      it.dia.hidden = !isDiaGroup(g);
       const vis = matchGroup(g, LINES.q) && (LINES.filter === 'running' ? a.trainCount > 0 : LINES.filter === 'trouble' ? a.status !== 'normal' : true);
       it.el.hidden = !vis; if (vis) shown++;
     }
@@ -570,7 +567,7 @@
     const lateTxt = (t.delaySec || 0) < 30 ? 'なし' : fmtDelay(t.delaySec);
     const dc = colOf(t.status);
     const nCars = t.cars || 0;
-    // 到着予想(サーバーが計算: MTRの走行計算を駅間の実績で補正。カスタムダイヤは時刻表の待ち合わせも考慮)。
+    // 到着予想(サーバーが計算: MTRの走行計算を駅間の実績で補正)。
     // この路線の駅は、同じ駅が複数回出る(往復・周回)ときは最初(=いちばん近い)ものを使い、前の駅より早い時刻になるものは出さない
     const age = () => (Date.now() - (S.lastOk || Date.now())) / 1000;
     const ahead = (t.etas || []).filter(e => !e.turnback);
@@ -578,7 +575,7 @@
     const etaOf = new Map(); { let last = -1; for (const e of ahead) { const k = String(e.stationId); if (etaOf.has(k)) continue; if (e.sec < last) continue; etaOf.set(k, e); last = e.sec; } }
     const hm = ms => { const d = new Date(ms); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
     const etaIn = e => { const rest = Math.max(0, Math.round(e.sec - age())); return rest < 60 ? `あと${rest}秒` : `あと${Math.floor(rest / 60)}分${pad2(rest % 60)}秒`; };
-    // 遅れているときは「定刻 ▶ 見込」(東京メトロアプリと同じ)。定刻はカスタムダイヤなら時刻表、それ以外は 見込 − 現在の遅れ
+    // 遅れているときは「定刻 ▶ 見込」(東京メトロアプリと同じ)。定刻は 見込 − 現在の遅れ
     const etaCell = e => {
       const exp = hm(e.millis);
       const schMs = e.scheduledMillis != null ? e.scheduledMillis : e.millis - (t.delaySec || 0) * 1000;
@@ -634,7 +631,6 @@
       }
       return box;
     })() : null;
-    const isDia = S.dia.routes.has(String(t.routeId));
     const dl = [['編成番号', t.title || t.formation || '番号未設定'], ['車両', t.typeName || t.series], t.typeName && t.series && t.series !== t.typeName ? ['系列', t.series] : null,
       ['両数', t.cars ? `${t.cars}両` : null], ['速度', t.speedKmh != null ? `${Math.round(t.speedKmh)} km/h` : null], ['乗客', t.passengers != null ? `${t.passengers}人` : null],
       ['車庫', t.depotName && `${jp(t.depotName)} ${t.sidingName || ''}`], ['路線', rn(r.name)]].filter(x => x && x[1] != null && x[1] !== '');
@@ -643,7 +639,6 @@
       h('div', { class: 'hero' },
         first ? h('div', { class: 'orig' }, `${jp(first.name)} 始発`) : null,
         h('div', { class: 'dest' }, h('b', null, jp(t.destination) || '回送'), ' 行き'),
-        isDia ? h('div', { class: 'meta' }, h('span', { class: 'diatag' }, 'ダイヤ運転'), ' 時刻表どおりに走る列車です(早く着いた駅では発車時刻まで待ちます)') : null,
         t.manual ? h('div', { class: 'meta' }, '手動運転中(遅れ判定の対象外)') : null),
       h('div', { class: 'drow' }, chip(t.status), h('div', { class: `late s-${dc === 'ok' ? 'normal' : t.status}` }, `遅れ：${lateTxt}`)),
       h('div', { class: 'msec' }, tp ? tl : h('div', { class: 'nodata' }, 'この列車の位置を路線上で特定できません(詳細レベルが低いか、路線外です)。'),
@@ -710,12 +705,12 @@
           h('td', null, h('span', { class: 'lsym sm', style: `--c:${rr.color}` })),
           h('td', { class: 'tt-dest' }, h('b', null, x.terminating ? '当駅止まり' : `${jp(x.destination) || '—'}行き`), h('small', null, rn(rr.name))),
           h('td', null, x.platform ? `${x.platform}番線` : ''),
-          h('td', null, x.custom ? h('span', { class: 'diatag' }, 'ダイヤ') : null, x.kind === 'live' ? h('span', { class: 'livetag' }, '走行中') : h('span', { class: 'plantag' }, '予定')),
+          h('td', null, x.kind === 'live' ? h('span', { class: 'livetag' }, '走行中') : h('span', { class: 'plantag' }, '予定')),
           h('td', { class: 'tt-in' }, min < 1 ? 'まもなく' : `${min}分後`, x.title || x.formation ? h('small', null, x.title || x.formation) : null));
       });
       body = h('div', { class: 'msec' },
         h('table', { class: 'dtbl tt' }, h('thead', null, h('tr', null, h('th', null, '発車'), h('th', null, ''), h('th', null, '行先'), h('th', null, '番線'), h('th', null, ''), h('th', null, ''))), h('tbody', null, rows)),
-        h('div', { class: 'nodata', style: 'margin-top:8px' }, '「走行中」は走っている列車の到着予想(折り返し後も含む)、「予定」は車庫の出庫予定と駅間の所要時間からの推定です。ダイヤ運転の路線は時刻表の時刻です。'));
+        h('div', { class: 'nodata', style: 'margin-top:8px' }, '「走行中」は走っている列車の到着予想(折り返し後も含む)、「予定」は車庫の出庫予定と駅間の所要時間からの推定です。'));
     }
     return modalFrame(`${jp(st.name)} の時刻表`, body, g ? g.color : null, true);
   }
@@ -723,9 +718,6 @@
     const k = 'tt:' + id; if (fetching.has(k)) return; fetching.add(k);
     try { const data = await get(`/api/schedule/${encodeURIComponent(id)}?hours=2`); S.ttCache.set(id, { t: Date.now(), data }); } catch (e) { S.ttCache.set(id, { t: Date.now(), data: null }); }
     fetching.delete(k); render(true);
-  }
-  async function loadDia() {
-    try { const d = await get('/api/dia'); S.dia = { routes: new Set(d.customRoutes || []), depots: new Set(d.customDepots || []) }; } catch (e) { /* 次回 */ }
   }
   const fetching = new Set();
   async function fetchRouteDetail(id) {
@@ -813,6 +805,6 @@
     const dark = root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme:dark)').matches;
     root.dataset.theme = dark ? 'light' : 'dark'; try { localStorage.setItem('mtrops-theme', root.dataset.theme); } catch (e) { /* */ }
   });
-  render(true); poll(); loadFleet(); loadDia();
-  setInterval(() => { if (!document.hidden) poll(); }, 1000); setInterval(() => { if (!document.hidden) loadFleet(); }, 5000); setInterval(() => { if (!document.hidden) loadDia(); }, 10000);
+  render(true); poll(); loadFleet();
+  setInterval(() => { if (!document.hidden) poll(); }, 1000); setInterval(() => { if (!document.hidden) loadFleet(); }, 5000);
 })();

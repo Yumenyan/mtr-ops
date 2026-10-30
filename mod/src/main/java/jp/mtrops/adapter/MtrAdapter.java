@@ -103,7 +103,7 @@ public final class MtrAdapter {
 		if (rd != platformIndexOwner || rd.platforms.size() != platformIndexSize) {
 			platformIndexOwner = rd;
 			platformIndexSize = rd.platforms.size();
-			platformIndexCache = DiaAdapter.platformsByRail(rd.platforms);
+			platformIndexCache = ScheduleAdapter.platformsByRail(rd.platforms);
 		}
 		return platformIndexCache;
 	}
