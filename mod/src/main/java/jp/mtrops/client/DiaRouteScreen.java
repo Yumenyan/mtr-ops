@@ -28,6 +28,7 @@ final class DiaRouteScreen extends TipScreen {
 	private static final int GAP = 10;
 	private static final int RIGHT_W = 190;
 	private static final int MAX_PERIOD_ROWS = 6;
+	private static final int AUTO_W = 24;
 
 	private final DiaDashboardScreen parent;
 	private final long routeId;
@@ -140,7 +141,7 @@ final class DiaRouteScreen extends TipScreen {
 			final int off = preview().offset(parent.working, routeId, i);
 			final String value = DiaModel.hms(table.first + off);
 			final int bw = 70;
-			final EditBox box = new EditBox(this.font, x0 + LEFT_W - bw, y + 2, bw, 16, Component.literal(""));
+			final EditBox box = new EditBox(this.font, x0 + LEFT_W - bw - AUTO_W, y + 2, bw, 16, Component.literal(""));
 			box.setValue(value);
 			box.setMaxLength(8);
 			box.setFilter(v -> v.matches("[0-9:]{0,8}"));
@@ -173,9 +174,17 @@ final class DiaRouteScreen extends TipScreen {
 			box.setEditable(parent.canEdit);
 			this.addRenderableWidget(box);
 			boxes.add(box);
-			tip(x0 + LEFT_W - bw, y + 2, bw, 16, idx == 0 ? "初便の発車時刻(変えると全ホームが一緒にずれる)" : "初便がこのホームを発車する時刻");
+			tip(x0 + LEFT_W - bw - AUTO_W, y + 2, bw, 16, idx == 0 ? "初便の発車時刻(変えると全ホームが一緒にずれる)" : "初便がこのホームを発車する時刻");
 			if (idx > 0) {
-				tip(x0, y, LEFT_W - bw - 52, ROW, "MTRの走行時間の目安 " + mmss((int) Math.round(ri.estRun[idx])) + "(実績で補正)");
+				button(x0 + LEFT_W - AUTO_W + 4, y, AUTO_W - 4, ROW, "自", b -> {
+					final int prev = preview().offset(parent.working, routeId, idx - 1);
+					final int need = Math.max((int) Math.round(ri.estRun[idx] + ri.dwell[idx]), (int) Math.ceil(ri.estRun[idx]) + parent.working.minOpen + 8);
+					table.offsets.put(idx, prev + need);
+					parent.markDirty();
+					build();
+				}).active = parent.canEdit;
+				tip(x0 + LEFT_W - AUTO_W + 4, y, AUTO_W - 4, ROW, "前のホームの発車時刻から、MTRの走行時間の目安 + 停車時間で、このホームの発車時刻を自動で決める");
+				tip(x0, y, LEFT_W - bw - AUTO_W - 52, ROW, "MTRの走行時間の目安 " + mmss((int) Math.round(ri.estRun[idx])) + "(実績で補正)");
 			}
 		}
 		if (pages > 1) {
@@ -388,7 +397,7 @@ final class DiaRouteScreen extends TipScreen {
 		}
 		final int per = rows();
 		final int start = page * per;
-		final int bw = 70;
+		final int bw = 70 + AUTO_W;
 		for (int i = start; i < Math.min(ri.stops.size(), start + per); i++) {
 			final DiaModel.Stop s = ri.stops.get(i);
 			final int y = 46 + (i - start) * ROW + 6;
