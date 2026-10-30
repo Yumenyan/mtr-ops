@@ -1,7 +1,6 @@
 package jp.mtrops.core;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -10,16 +9,16 @@ import java.util.Set;
 
 /**
  * カスタムダイヤの実行時の状態(サーバー側)。MCに依存しない。
- *  ・どの列車がどの便か(出庫した時刻から決める。途中から見つけた列車は駅と時刻から推定)
- *  ・停車駅ごとの発車時刻と、遅れ
+ *  ・どの列車がどの路線のどの便か(始発ホームに着いたとき、次に発車する便を割り当てる。途中から見つけた列車は駅と時刻から推定)
+ *  ・駅ごとの発車時刻と、遅れ
  * MTRの列車処理(サーバースレッド)からだけ呼ばれる想定。HTTPスレッドからは snapshot() で読む。
  */
 public final class DiaRuntime {
 
 	public static final class Assign {
-		public long depotId;
+		public long routeId;
 		public int no;
-		/** 最後に発車した停車駅(Profile.stops の番号)。-1 = まだ */
+		/** 最後に発車した駅(路線の駅の番号 = DiaModel.Stop.stationIndex)。-1 = まだ */
 		public int lastStop = -1;
 		/** 遅れ(秒)。正 = 遅れ、負 = 早着 */
 		public int delay;
@@ -29,43 +28,28 @@ public final class DiaRuntime {
 	/** 外から読むための写し。 */
 	public static final class View {
 		public long trainId;
-		public long depotId;
+		public long routeId;
 		public int no;
 		public int lastStop;
 		public int delay;
 	}
 
+	/** 始発の発車時刻の何秒前まで・何秒先までの便を、始発ホームに着いた列車に割り当てるか */
+	private static final int ORIGIN_LATE = 300;
+	private static final int ORIGIN_AHEAD = 1800;
+	/** 途中の駅で見つけた列車を、時刻から便に当てはめる許容(秒) */
+	private static final int GUESS_WINDOW = 600;
+
 	private DiaModel.Config config = new DiaModel.Config();
 	private Map<Long, DiaModel.Profile> profiles = new HashMap<>();
 	private DiaPlanner.Result plan = new DiaPlanner.Result();
 	private Set<Long> customDepots = new HashSet<>();
-	/** pathIndex → 停車駅番号(車庫ごと) */
-	private final Map<Long, Map<Integer, Integer>> stopOfPath = new HashMap<>();
+	/** 車庫 → (pathIndex → 時刻表に載る停車駅)。ダイヤ運転の路線の停車だけ */
+	private final Map<Long, Map<Integer, DiaModel.Stop>> stopOfPath = new HashMap<>();
 	private final Map<Long, Assign> assigns = new HashMap<>();
 	private final Map<String, Long> taken = new HashMap<>();
-	/** ホームごとの、最後にカスタムダイヤの列車が発車したUNIXミリ秒(前の列車に詰まらないための間隔確保に使う) */
-	private final Map<Long, Long> lastDepart = new HashMap<>();
 
-	public synchronized void recordDeparture(long platformId, long millis) {
-		if (platformId != 0) {
-			lastDepart.put(platformId, millis);
-		}
-	}
-
-	/**
-	 * 前の列車の発車から minGapSec 秒あけるために、あと何tick待つべきか(0以上)。
-	 * 遅れて前の列車に追いついた列車を、ホームで少し待たせて間隔を戻す(連続した遅れ・詰まりの自動調整)。
-	 */
-	public synchronized int gapRemainingTicks(long platformId, int minGapSec, long nowMillis) {
-		final Long t = lastDepart.get(platformId);
-		if (t == null || minGapSec <= 0) {
-			return 0;
-		}
-		final long remain = t + minGapSec * 1000L - nowMillis;
-		return remain <= 0 ? 0 : (int) Math.min(remain / 50, minGapSec * 20L);
-	}
-
-	public synchronized void update(DiaModel.Config cfg, Map<Long, DiaModel.Profile> profs, Map<Long, List<Long>> depotRoutes) {
+	public synchronized void update(DiaModel.Config cfg, Map<Long, DiaModel.Profile> profs, Map<Long, List<Long>> depotRoutes, Map<String, Double> ratios) {
 		this.config = cfg;
 		this.profiles = profs;
 		final Set<Long> custom = new HashSet<>();
@@ -75,35 +59,40 @@ public final class DiaRuntime {
 			}
 		}
 		this.customDepots = custom;
-		final List<Long> list = new ArrayList<>(custom);
-		Collections.sort(list);
-		this.plan = DiaPlanner.plan(cfg, list, profs);
+		final DiaPlanner.Result old = this.plan;
+		this.plan = DiaPlanner.plan(cfg, profs, ratios);
 		stopOfPath.clear();
 		for (final DiaModel.Profile p : profs.values()) {
-			final Map<Integer, Integer> m = new HashMap<>();
-			for (int i = 0; i < p.stops.size(); i++) {
-				m.put(p.stops.get(i).pathIndex, i);
+			final Map<Integer, DiaModel.Stop> m = new HashMap<>();
+			for (final DiaModel.Stop s : p.stops) {
+				final DiaPlanner.RouteInfo ri = plan.info.get(s.routeId);
+				if (!s.pass && ri != null && s.stationIndex >= 0 && s.stationIndex < ri.stops.size() && ri.stops.get(s.stationIndex).platformId == s.platformId) {
+					m.put(s.pathIndex, s);
+				}
 			}
 			stopOfPath.put(p.depotId, m);
 		}
-		// 便の並びが変わったら割り当てをやり直す(便番号の意味が変わるため)
-		assigns.clear();
+		// 便の並びが変わった路線の割り当てはやり直す(便番号の意味が変わるため)。変わっていなければ走行中の列車の割り当てを保つ
 		taken.clear();
-		lastDepart.clear();
+		assigns.values().removeIf(a -> {
+			final DiaModel.Run o = old.find(a.routeId, a.no);
+			final DiaModel.Run n = plan.find(a.routeId, a.no);
+			return o == null || n == null || o.originDep != n.originDep;
+		});
+		for (final Map.Entry<Long, Assign> e : assigns.entrySet()) {
+			taken.put(e.getValue().routeId + "#" + e.getValue().no, e.getKey());
+		}
 	}
 
 	public synchronized DiaPlanner.Result plan() {
 		return plan;
 	}
 
-	public synchronized DiaModel.Profile profile(long depotId) {
-		return profiles.get(depotId);
-	}
-
 	public synchronized DiaModel.Config config() {
 		return config;
 	}
 
+	/** ダイヤ運転の路線を含む車庫か(列車処理のフックの入口で使う軽い判定)。 */
 	public synchronized boolean isCustomDepot(long depotId) {
 		return customDepots.contains(depotId);
 	}
@@ -112,64 +101,56 @@ public final class DiaRuntime {
 		return new HashSet<>(customDepots);
 	}
 
+	public synchronized boolean isCustomRoute(long routeId) {
+		return plan.runs.containsKey(routeId);
+	}
+
 	public synchronized DiaModel.RouteSetting route(long routeId) {
 		return config.route(routeId);
 	}
 
-	/** 停車駅の番号。時刻表にない位置なら -1。 */
-	public synchronized int stopOf(long depotId, int pathIndex) {
-		final Map<Integer, Integer> m = stopOfPath.get(depotId);
-		final Integer v = m == null ? null : m.get(pathIndex);
-		return v == null ? -1 : v;
+	/** 経路上の位置 pathIndex が時刻表に載る停車なら、その駅。そうでなければ null。 */
+	public synchronized DiaModel.Stop stopAt(long depotId, int pathIndex) {
+		final Map<Integer, DiaModel.Stop> m = stopOfPath.get(depotId);
+		return m == null ? null : m.get(pathIndex);
 	}
 
-	/** 出庫した列車に便を割り当てる(出庫予定 ±3分 で、まだ使われていない一番近い便)。 */
-	public synchronized Assign onDeploy(long trainId, long depotId, int nowSec, long nowMillis) {
+	/** 列車が stop に着いた(向かっている)とき、その路線の便を割り当てる。すでに同じ路線の便なら何もしない。 */
+	public synchronized Assign ensure(long trainId, DiaModel.Stop stop, int nowSec, long nowMillis) {
+		final Assign a = assigns.get(trainId);
+		if (a != null && a.routeId == stop.routeId && stop.stationIndex >= a.lastStop) {
+			return a;
+		}
 		release(trainId);
-		final List<DiaModel.Run> runs = plan.runs.get(depotId);
+		final List<DiaModel.Run> runs = plan.runs.get(stop.routeId);
 		if (runs == null) {
 			return null;
 		}
+		final int idx = stop.stationIndex;
 		DiaModel.Run best = null;
-		int bestDiff = 181;
+		int bestDiff = Integer.MAX_VALUE;
 		for (final DiaModel.Run r : runs) {
-			final int d = Math.abs(DiaModel.wrapDiff(nowSec, r.depotDep));
-			if (d < bestDiff && !taken.containsKey(r.key())) {
-				best = r;
-				bestDiff = d;
-			}
-		}
-		return best == null ? null : take(trainId, best, -1, nowMillis);
-	}
-
-	/** 割り当てが無いまま走っている列車(再起動直後など)を、いま居る停車駅と時刻から推定する。 */
-	public synchronized Assign guess(long trainId, long depotId, int stop, int nowSec, long nowMillis) {
-		final Assign a = assigns.get(trainId);
-		if (a != null) {
-			return a;
-		}
-		final List<DiaModel.Run> runs = plan.runs.get(depotId);
-		if (runs == null || stop < 0) {
-			return null;
-		}
-		DiaModel.Run best = null;
-		int bestDiff = 601;
-		for (final DiaModel.Run r : runs) {
-			if (stop >= r.dep.length || taken.containsKey(r.key())) {
+			if (idx >= r.dep.length || taken.containsKey(r.key())) {
 				continue;
 			}
-			final int d = Math.abs(DiaModel.wrapDiff(nowSec, r.dep[stop]));
-			if (d < bestDiff) {
+			final int diff = DiaModel.wrapDiff(r.dep[idx], nowSec); // 正 = まだ先
+			if (idx == 0) {
+				// 始発ホーム: 次に発車する便(少し過ぎた便も、遅れた列車のために許す)
+				if (diff >= -ORIGIN_LATE && diff <= ORIGIN_AHEAD && diff < bestDiff) {
+					best = r;
+					bestDiff = diff;
+				}
+			} else if (Math.abs(diff) <= GUESS_WINDOW && Math.abs(diff) < bestDiff) {
 				best = r;
-				bestDiff = d;
+				bestDiff = Math.abs(diff);
 			}
 		}
-		return best == null ? null : take(trainId, best, stop - 1, nowMillis);
+		return best == null ? null : take(trainId, best, idx - 1, nowMillis);
 	}
 
 	private Assign take(long trainId, DiaModel.Run r, int lastStop, long nowMillis) {
 		final Assign a = new Assign();
-		a.depotId = r.depotId;
+		a.routeId = r.routeId;
 		a.no = r.no;
 		a.lastStop = lastStop;
 		a.lastSeenMillis = nowMillis;
@@ -185,17 +166,17 @@ public final class DiaRuntime {
 	public synchronized void release(long trainId) {
 		final Assign a = assigns.remove(trainId);
 		if (a != null) {
-			taken.remove(a.depotId + "#" + a.no);
+			taken.remove(a.routeId + "#" + a.no);
 		}
 	}
 
-	/** その停車駅の発車時刻(秒)。便が無い/時刻表にない駅なら Integer.MIN_VALUE。 */
+	/** その駅の発車時刻(秒)。便が無い/時刻表にない駅なら Integer.MIN_VALUE。 */
 	public synchronized int departureOf(long trainId, int stop) {
 		final Assign a = assigns.get(trainId);
 		if (a == null || stop < 0) {
 			return Integer.MIN_VALUE;
 		}
-		final DiaModel.Run r = plan.find(a.depotId, a.no);
+		final DiaModel.Run r = plan.find(a.routeId, a.no);
 		if (r == null || stop >= r.dep.length) {
 			return Integer.MIN_VALUE;
 		}
@@ -207,14 +188,14 @@ public final class DiaRuntime {
 		if (a == null || stop < 0) {
 			return Integer.MIN_VALUE;
 		}
-		final DiaModel.Run r = plan.find(a.depotId, a.no);
+		final DiaModel.Run r = plan.find(a.routeId, a.no);
 		if (r == null || stop >= r.arr.length) {
 			return Integer.MIN_VALUE;
 		}
 		return r.arr[stop];
 	}
 
-	/** 停車駅を発車した。遅れを記録する。 */
+	/** 駅を発車した。遅れを記録する。 */
 	public synchronized void onDepart(long trainId, int stop, int nowSec) {
 		final Assign a = assigns.get(trainId);
 		if (a == null || stop < 0) {
@@ -267,7 +248,7 @@ public final class DiaRuntime {
 		for (final Map.Entry<Long, Assign> e : assigns.entrySet()) {
 			final View v = new View();
 			v.trainId = e.getKey();
-			v.depotId = e.getValue().depotId;
+			v.routeId = e.getValue().routeId;
 			v.no = e.getValue().no;
 			v.lastStop = e.getValue().lastStop;
 			v.delay = e.getValue().delay;

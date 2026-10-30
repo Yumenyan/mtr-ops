@@ -1,16 +1,14 @@
 package jp.mtrops.core;
 
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 理想走行(MTRの理論値)を、実際の走行時間の実績で伸ばす。
- * MTRの理論値は信号待ち・加減速の差で実際より短く出る。そのまま時刻表にすると、後ろの列車が追いついて詰まるので、
- * 駅間ごとの「実績 ÷ 理論」の比率(SectionStats)で走行時間を伸ばしてから時刻表を組む(自動調整)。
+ * 駅間の走行時間の実績比率(実績 ÷ MTRの理論値)。ダイヤ編成ツールの所要時間の見積もり(表の初期値・詰まりの診断)にだけ使う。
+ * 発車時刻そのものは動かさない。
  *
- * 比率は 1.0〜MAX 倍に収め、0.05刻みに丸める(実績の揺れで時刻表が作り直されないように)。観測が少ない区間は伸ばさない。
- * サーバーがこれを適用した理想走行を同期するので、サーバーとクライアントの時刻表は同じになる。
+ * 比率は 1.0〜MAX 倍に収め、0.05刻みに丸める(実績の揺れで見積もりが変わり続けないように)。観測が少ない区間は 1.0 のまま。
+ * サーバーが同期するので、サーバーとクライアントは同じ見積もりになる。
  */
 public final class DiaStretch {
 
@@ -33,49 +31,5 @@ public final class DiaStretch {
 			}
 		}
 		return out;
-	}
-
-	public static Map<Long, DiaModel.Profile> apply(Map<Long, DiaModel.Profile> profiles, Map<String, Double> ratios) {
-		if (ratios.isEmpty()) {
-			return profiles;
-		}
-		final Map<Long, DiaModel.Profile> out = new LinkedHashMap<>();
-		for (final Map.Entry<Long, DiaModel.Profile> e : profiles.entrySet()) {
-			out.put(e.getKey(), apply(e.getValue(), ratios));
-		}
-		return out;
-	}
-
-	public static DiaModel.Profile apply(DiaModel.Profile p, Map<String, Double> ratios) {
-		final DiaModel.Profile q = new DiaModel.Profile();
-		q.depotId = p.depotId;
-		q.sidingId = p.sidingId;
-		double shift = 0;
-		DiaModel.Stop prev = null;
-		for (final DiaModel.Stop s : p.stops) {
-			final DiaModel.Stop c = new DiaModel.Stop();
-			c.pathIndex = s.pathIndex;
-			c.stationId = s.stationId;
-			c.platformId = s.platformId;
-			c.routeId = s.routeId;
-			c.station = s.station;
-			c.platform = s.platform;
-			c.stationIndex = s.stationIndex;
-			c.pass = s.pass;
-			if (!s.pass && prev != null) {
-				final Double r = ratios.get(SectionStats.key(prev.stationId, s.stationId));
-				if (r != null) {
-					shift += Math.max(0, s.arr - prev.dep) * (r - 1);
-				}
-			}
-			c.arr = s.arr + shift;
-			c.dep = s.dep + shift;
-			if (!s.pass) {
-				prev = s;
-			}
-			q.stops.add(c);
-		}
-		q.total = p.total + shift;
-		return q;
 	}
 }

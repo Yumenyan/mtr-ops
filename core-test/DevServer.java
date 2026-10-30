@@ -246,11 +246,10 @@ public class DevServer {
 			final DiaModel.Config dc = new DiaModel.Config();
 			final DiaModel.RouteSetting rs = new DiaModel.RouteSetting(); rs.routeId = l4.id; rs.custom = true;
 			dc.routes.put(l4.id, rs);
-			final DiaModel.DepotPlan dp2 = new DiaModel.DepotPlan(); dp2.depotId = depot2; dp2.first = 5 * 3600; dp2.last = 24 * 3600;
-			dp2.periods.add(new DiaModel.Period("終日", 0, 2 * DiaModel.DAY, 480));
-			dc.plans.put(depot2, dp2);
+			rs.table = DiaModel.Table.defaults();
+			rs.table.first = 5 * 3600; rs.table.periods.get(0).headway = 480;
 			final int utc = java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 1000;
-			final byte[] b = DiaSync.encode(java.util.TimeZone.getDefault().getID(), utc, dc, Map.of(depot2, profileOf(depot2, l2)), List.of(depot2));
+			final byte[] b = DiaSync.encode(java.util.TimeZone.getDefault().getID(), utc, dc, Map.of(depot2, profileOf(depot2, l4)), List.of(depot2), new HashMap<>());
 			store.setDia(DiaSync.decode(b));
 		}
 

@@ -33,7 +33,7 @@ import java.util.function.Function;
  * GET /api/runtimes      駅間ごとの所要時間(MTRの理論値・走行・停車・実績)
  * GET /api/schedule/{駅} 駅の時刻表(出庫予定と所要時間の推定から。?hours=2)。駅はID・英名・和名で指定(例 nagaumi)
  * GET /api/rails         レールの形と種別(鉄道/船/ケーブルカー/飛行機、本線/ホーム/車庫線/折返し 等)。/api/geometry/rails も同じ
- * GET /api/dia           カスタムダイヤの設定・時刻表・運行中の列車の便と遅れ(読み取りのみ。編集はゲーム内のダイヤ編成ツール)
+ * GET /api/dia           ダイヤ編成ツールの設定・路線ごとの時刻表(?route=ID で便を含める)・詰まり/待避の診断・運行中の列車の便と遅れ(読み取りのみ。編集はゲーム内のダイヤ編成ツール)
  * 列車の etas(到着予想)は折り返し後の路線も含む。既定は20分先まで(?etaHorizon=秒 で変更、最大7200)
  *
  * IDはJavaScriptで精度が落ちるため、すべて文字列で返す。
@@ -812,7 +812,6 @@ public final class ApiHandler {
 		final List<Ent> list = new ArrayList<>();
 		final ScheduleSync.State ss = store.schedule();
 		final DiaSync.State ds = store.dia();
-		final java.util.Set<Long> customDepots = new java.util.HashSet<>(ds.customDepots);
 
 		// 1. 走っている列車(到着予想。折り返し後の路線も含む)
 		final Snapshot snap = store.live();
@@ -840,7 +839,7 @@ public final class ApiHandler {
 					x.platformId = e.platformId;
 					x.routeId = e.routeId != 0 ? e.routeId : v.s.routeId;
 					x.depotId = v.s.depotId;
-					x.custom = customDepots.contains(v.s.depotId);
+					x.custom = ds.plan.runs.containsKey(x.routeId);
 					x.train = v;
 					list.add(x);
 				}
@@ -849,9 +848,6 @@ public final class ApiHandler {
 
 		// 2. これから出庫する列車(MTRの車庫の出庫時刻 + 理想走行を実績で補正した所要時間)
 		for (final Map.Entry<Long, long[]> e : ss.deploys.entrySet()) {
-			if (customDepots.contains(e.getKey())) {
-				continue;
-			}
 			final DiaModel.Profile prof = ss.profiles.get(e.getKey());
 			if (prof == null) {
 				continue;
@@ -859,8 +855,8 @@ public final class ApiHandler {
 			final double[] off = calibratedOffsets(prof, ss.stats);
 			for (int k = 0; k < prof.stops.size(); k++) {
 				final DiaModel.Stop stop = prof.stops.get(k);
-				if (stop.pass || stop.stationId != st.id) {
-					continue;
+				if (stop.pass || stop.stationId != st.id || ds.plan.runs.containsKey(stop.routeId)) {
+					continue; // ダイヤ運転の路線は時刻表から
 				}
 				for (final long t0 : e.getValue()) {
 					final Ent x = new Ent();
@@ -878,25 +874,24 @@ public final class ApiHandler {
 			}
 		}
 
-		// 3. カスタムダイヤの車庫は時刻表どおり(まだ出庫していない便)
+		// 3. ダイヤ運転の路線は時刻表どおり(まだ始発を出ていない便)
 		if (ds.received) {
 			final java.util.Set<String> running = new java.util.HashSet<>();
 			for (final DiaRuntime.View v : store.diaLive().trains) {
-				running.add(v.depotId + "#" + v.no);
+				running.add(v.routeId + "#" + v.no);
 			}
-			for (final Long depot : ds.customDepots) {
-				final List<DiaModel.Run> runs = ds.plan.runs.get(depot);
-				final DiaModel.Profile prof = ds.profiles.get(depot);
-				if (runs == null || prof == null) {
+			for (final Map.Entry<Long, List<DiaModel.Run>> re : ds.plan.runs.entrySet()) {
+				final DiaPlanner.RouteInfo ri = ds.plan.info.get(re.getKey());
+				if (ri == null) {
 					continue;
 				}
-				for (final DiaModel.Run r : runs) {
-					if (running.contains(r.key()) || diaMillis(r.depotDep, now, ds.utcOffset) < now) {
+				for (final DiaModel.Run r : re.getValue()) {
+					if (running.contains(r.key()) || diaMillis(r.originDep, now, ds.utcOffset) < now) {
 						continue;
 					}
-					for (int k = 0; k < prof.stops.size() && k < r.arr.length; k++) {
-						final DiaModel.Stop stop = prof.stops.get(k);
-						if (stop.pass || stop.stationId != st.id) {
+					for (int k = 0; k < ri.stops.size() && k < r.arr.length; k++) {
+						final DiaModel.Stop stop = ri.stops.get(k);
+						if (stop.stationId != st.id) {
 							continue;
 						}
 						final Ent x = new Ent();
@@ -909,7 +904,25 @@ public final class ApiHandler {
 						x.sched = x.arr;
 						x.platformId = stop.platformId;
 						x.routeId = stop.routeId;
-						x.depotId = depot;
+						x.custom = true;
+						list.add(x);
+					}
+					for (int m = 0; m < r.passPlatform.length; m++) {
+						final DiaModel.Stop ps = passStop(ri, r.passPlatform[m]);
+						if (ps == null || ps.stationId != st.id) {
+							continue;
+						}
+						final Ent x = new Ent();
+						x.kind = "planned";
+						x.pass = true;
+						x.arr = diaMillis(r.passTime[m], now, ds.utcOffset);
+						if (x.arr < now || x.arr > until) {
+							continue;
+						}
+						x.dep = x.arr;
+						x.sched = x.arr;
+						x.platformId = ps.platformId;
+						x.routeId = ps.routeId;
 						x.custom = true;
 						list.add(x);
 					}
@@ -979,6 +992,17 @@ public final class ApiHandler {
 		return w.toString();
 	}
 
+	private static DiaModel.Stop passStop(DiaPlanner.RouteInfo ri, long platformId) {
+		for (final List<DiaModel.Stop> l : ri.passes) {
+			for (final DiaModel.Stop p : l) {
+				if (p.platformId == platformId) {
+					return p;
+				}
+			}
+		}
+		return null;
+	}
+
 	/** 車庫を出てから各停車駅に着くまでの秒(理想走行を、駅間ごとの実績比率で伸ばす)。通過駅は前の駅と同じ値。 */
 	private static double[] calibratedOffsets(DiaModel.Profile prof, SectionStats stats) {
 		final double[] off = new double[prof.stops.size()];
@@ -1031,7 +1055,7 @@ public final class ApiHandler {
 		final DiaSync.State st = store.dia();
 		final DiaSync.Live live = store.diaLive();
 		final Topology t = store.topology();
-		final long only = q.containsKey("depot") ? JsonReader.lng(q.get("depot"), -1) : -1;
+		final long only = q.containsKey("route") ? JsonReader.lng(q.get("route"), -1) : -1;
 		final boolean allRuns = "all".equals(q.get("runs"));
 		final JsonWriter w = new JsonWriter().beginObject();
 		w.field("ok", true);
@@ -1049,11 +1073,6 @@ public final class ApiHandler {
 		}
 		w.name("settings");
 		DiaJson.writeConfig(w, st.config);
-		w.name("customDepots").beginArray();
-		for (final Long d : st.customDepots) {
-			w.value(Long.toString(d));
-		}
-		w.endArray();
 		w.name("customRoutes").beginArray();
 		for (final DiaModel.RouteSetting r : st.config.routes.values()) {
 			if (r.custom) {
@@ -1061,34 +1080,30 @@ public final class ApiHandler {
 			}
 		}
 		w.endArray();
-		w.name("depots").beginArray();
-		for (final Topology.Depot d : t.depots) {
-			if (!st.customDepots.contains(d.id) && only != d.id) {
+		w.name("routes").beginArray();
+		for (final Map.Entry<Long, DiaPlanner.RouteInfo> e : st.plan.info.entrySet()) {
+			final DiaPlanner.RouteInfo ri = e.getValue();
+			if (only != -1 && only != e.getKey()) {
 				continue;
 			}
 			w.beginObject();
-			w.idField("id", d.id);
-			w.field("name", d.name);
-			final DiaModel.Profile prof = st.profiles.get(d.id);
-			if (prof != null) {
-				w.name("stops").beginArray();
-				for (int i = 0; i < prof.stops.size(); i++) {
-					final DiaModel.Stop s = prof.stops.get(i);
-					w.beginObject().field("i", i).idField("stationId", s.stationId).idField("platformId", s.platformId).idField("routeId", s.routeId)
-							.field("station", s.station).field("platform", s.platform).field("pass", s.pass).field("arr", s.arr, 1).field("dep", s.dep, 1).endObject();
-				}
-				w.endArray();
-				w.field("total", prof.total, 1);
+			w.idField("routeId", e.getKey());
+			w.name("stops").beginArray();
+			for (int i = 0; i < ri.stops.size(); i++) {
+				final DiaModel.Stop s = ri.stops.get(i);
+				w.beginObject().field("i", i).idField("stationId", s.stationId).idField("platformId", s.platformId)
+						.field("station", s.station).field("platform", s.platform)
+						.field("estRun", ri.estRun[i], 1).field("dwell", ri.dwell[i], 1)
+						.field("offset", st.plan.offset(st.config, e.getKey(), i)).endObject();
 			}
-			final List<DiaModel.Run> runs = st.plan.runs.get(d.id);
+			w.endArray();
+			final List<DiaModel.Run> runs = st.plan.runs.get(e.getKey());
 			if (runs != null) {
 				w.field("runCount", runs.size());
-				final Integer off = st.plan.offsets.get(d.id);
-				w.field("appliedOffset", off == null ? 0 : off);
-				if (allRuns || only == d.id) {
+				if (allRuns || only == e.getKey()) {
 					w.name("runs").beginArray();
 					for (final DiaModel.Run r : runs) {
-						w.beginObject().field("no", r.no).field("depotDep", DiaModel.hms(r.depotDep));
+						w.beginObject().field("no", r.no).field("originDep", DiaModel.hms(r.originDep));
 						w.name("arr").beginArray();
 						for (final int x : r.arr) {
 							w.value(DiaModel.hms(x));
@@ -1096,10 +1111,6 @@ public final class ApiHandler {
 						w.endArray().name("dep").beginArray();
 						for (final int x : r.dep) {
 							w.value(DiaModel.hms(x));
-						}
-						w.endArray().name("hold").beginArray();
-						for (final int x : r.hold) {
-							w.value(x);
 						}
 						w.endArray().endObject();
 					}
@@ -1109,16 +1120,39 @@ public final class ApiHandler {
 			w.endObject();
 		}
 		w.endArray();
+		w.name("issues").beginArray();
+		for (final DiaModel.Issue is : st.plan.issues) {
+			w.beginObject().field("kind", is.kind == 0 ? "info" : "problem").field("type", issueName(is.sub));
+			w.idField("stationId", is.stationId).field("station", is.station).field("platform", is.platform);
+			w.idField("routeA", is.routeA).idField("routeB", is.routeB);
+			w.field("time", DiaModel.hms(is.time)).field("amount", is.amount).field("more", is.more).endObject();
+		}
+		w.endArray();
 		w.name("warnings").beginArray();
 		st.plan.warnings.forEach(w::value);
 		w.endArray();
 		w.name("live").beginArray();
 		for (final DiaRuntime.View v : live.trains) {
-			w.beginObject().idField("trainId", v.trainId).idField("depotId", v.depotId).field("no", v.no).field("lastStop", v.lastStop).field("delay", v.delay).endObject();
+			w.beginObject().idField("trainId", v.trainId).idField("routeId", v.routeId).field("no", v.no).field("lastStop", v.lastStop).field("delay", v.delay).endObject();
 		}
 		w.endArray();
 		w.endObject();
 		return w.toString();
+	}
+
+	private static String issueName(int sub) {
+		switch (sub) {
+			case DiaModel.Issue.PLATFORM:
+				return "platform";
+			case DiaModel.Issue.OVERTAKE:
+				return "overtake";
+			case DiaModel.Issue.SIDING:
+				return "siding";
+			case DiaModel.Issue.SHORT_TIME:
+				return "shortTime";
+			default:
+				return "headway";
+		}
 	}
 
 	// ------------------------------------------------------------------ trains

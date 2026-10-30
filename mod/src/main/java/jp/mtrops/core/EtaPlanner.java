@@ -58,16 +58,16 @@ public final class EtaPlanner {
 
 	/**
 	 * カスタムダイヤの便の時刻表を、到着予想に重ねる。
-	 * @param prof        車庫の理想走行(停車駅の並び)
+	 * @param ri          路線の停車ホームの並びとMTRの停車時間
 	 * @param run         この列車に割り当てた便
-	 * @param lastStop    最後に発車した停車駅(prof.stops の番号。-1 = まだ)
-	 * @param currentStop 停車中の停車駅の番号(走行中は -1)
+	 * @param lastStop    最後に発車した駅(路線の駅の番号。-1 = まだ)
+	 * @param currentStop 停車中の駅の番号(走行中は -1)
 	 * @param nowSec      サーバーのタイムゾーンでの、その日の0時からの秒
 	 * @param minOpenSec  遅れているときにドアを開けておく最短の秒(DiaModel.Config.minOpen)
 	 */
-	public static void applyTimetable(TrainSample s, DiaModel.Profile prof, DiaModel.Run run, int lastStop, int currentStop, double nowSec, int minOpenSec) {
+	public static void applyTimetable(TrainSample s, DiaPlanner.RouteInfo ri, DiaModel.Run run, int lastStop, int currentStop, double nowSec, int minOpenSec) {
 		final int n = s.etaTicks.length;
-		if (prof == null || run == null || n == 0) {
+		if (ri == null || run == null || n == 0) {
 			return;
 		}
 		// 停車駅の番号を対応づける(ホームIDで、前から順に)
@@ -75,14 +75,14 @@ public final class EtaPlanner {
 		java.util.Arrays.fill(stopOf, -1);
 		int p = Math.max(0, Math.max(lastStop, currentStop) + 1);
 		for (int k = 0; k < n; k++) {
-			if (k < s.etaPass.length && s.etaPass[k]) {
-				continue; // 通過は時刻表の停車駅に数えない
+			if ((k < s.etaPass.length && s.etaPass[k]) || s.etaRouteIds[k] != run.routeId) {
+				continue; // 通過・別の路線は、この便の時刻表に数えない
 			}
 			int q = p;
-			while (q < prof.stops.size() && (prof.stops.get(q).pass || prof.stops.get(q).platformId != s.etaPlatformIds[k])) {
+			while (q < ri.stops.size() && ri.stops.get(q).platformId != s.etaPlatformIds[k]) {
 				q++;
 			}
-			if (q >= prof.stops.size() || q >= run.arr.length) {
+			if (q >= ri.stops.size() || q >= run.arr.length) {
 				break;
 			}
 			stopOf[k] = q;
@@ -94,7 +94,7 @@ public final class EtaPlanner {
 		double depPrev = 0;
 		double physPrev = 0;
 		if (s.atStop && currentStop >= 0 && currentStop < run.dep.length) {
-			final double dwellPhys = dwellTicks(prof, currentStop);
+			final double dwellPhys = dwellTicks(ri, currentStop);
 			physPrev = Math.max(0, dwellPhys - s.elapsedDwellTicks);
 			final double remainMin = Math.max(0, Math.min(dwellPhys, minDwell) - s.elapsedDwellTicks);
 			depPrev = Math.max(remainMin, ticksUntil(run.dep[currentStop], nowSec));
@@ -102,9 +102,9 @@ public final class EtaPlanner {
 		for (int k = 0; k < n; k++) {
 			final double leg = Math.max(0, s.etaTicks[k] - physPrev);
 			final double arr = depPrev + leg;
-			physPrev = s.etaTicks[k] + (stopOf[k] >= 0 ? dwellTicks(prof, stopOf[k]) : 0);
+			physPrev = s.etaTicks[k] + (stopOf[k] >= 0 ? dwellTicks(ri, stopOf[k]) : 0);
 			set(s, k, arr, stopOf[k], run, nowSec);
-			depPrev = departure(arr, stopOf[k], prof, run, nowSec, minDwell);
+			depPrev = departure(arr, stopOf[k], ri, run, nowSec, minDwell);
 		}
 	}
 
@@ -114,11 +114,11 @@ public final class EtaPlanner {
 	}
 
 	/** 見込みの到着 arr から、その駅を発車する見込み(時刻表の発車時刻より前には出ない。遅れていれば最短の停車で出る)。 */
-	private static double departure(double arr, int stop, DiaModel.Profile prof, DiaModel.Run run, double nowSec, int minDwell) {
+	private static double departure(double arr, int stop, DiaPlanner.RouteInfo ri, DiaModel.Run run, double nowSec, int minDwell) {
 		if (stop < 0) {
 			return arr;
 		}
-		final double phys = dwellTicks(prof, stop);
+		final double phys = dwellTicks(ri, stop);
 		if (stop >= run.dep.length) {
 			return arr + phys;
 		}
@@ -126,9 +126,8 @@ public final class EtaPlanner {
 		return Math.max(arr + Math.min(phys, minDwell), sched);
 	}
 
-	private static double dwellTicks(DiaModel.Profile prof, int stop) {
-		final DiaModel.Stop st = prof.stops.get(stop);
-		return Math.max(0, (st.dep - st.arr) * 20);
+	private static double dwellTicks(DiaPlanner.RouteInfo ri, int stop) {
+		return Math.max(0, ri.dwell[stop] * 20);
 	}
 
 	/** 「その日の秒」の時刻まで、今から何tickか(日またぎは前後12時間で丸める)。 */
