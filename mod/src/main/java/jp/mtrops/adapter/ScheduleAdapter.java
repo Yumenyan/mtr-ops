@@ -1,7 +1,7 @@
 package jp.mtrops.adapter;
 
-import jp.mtrops.core.DiaModel;
-import jp.mtrops.core.DiaRailTime;
+import jp.mtrops.core.IdealRun;
+import jp.mtrops.core.RailTime;
 import mtr.data.DataCache;
 import mtr.data.Depot;
 import mtr.data.Platform;
@@ -26,17 +26,17 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * カスタムダイヤ用のMTRアクセス(MTR 3.2.2-hotfix-1 のソースで確認した公開API/フィールドのみ)。
+ * 時刻表API用のMTRアクセス(MTR 3.2.2-hotfix-1 のソースで確認した公開API/フィールドのみ)。
  *  ・車庫ごとの理想走行(停車駅・通過するホーム・時刻)を作る
  *
  * 車庫・路線・ホーム・レールなど MTR に保存されたデータは一切書き換えない。
  */
-public final class DiaAdapter {
+public final class ScheduleAdapter {
 
 	private static final Field TRAIN_RAIL_LENGTH = find(mtr.data.Train.class, "railLength");
 	private static final Field SAVED_RAIL_POSITIONS = find(SavedRailBase.class, "positions");
 
-	private DiaAdapter() {
+	private ScheduleAdapter() {
 	}
 
 	private static Field find(Class<?> owner, String name) {
@@ -88,8 +88,8 @@ public final class DiaAdapter {
 	 * 指定した車庫それぞれについて、経路が出来ている最初の車庫線から理想走行を作る。
 	 * 経路が無い車庫は含めない。
 	 */
-	public static Map<Long, DiaModel.Profile> buildProfiles(MinecraftServer server, Collection<Long> depotIds) {
-		final Map<Long, DiaModel.Profile> out = new LinkedHashMap<>();
+	public static Map<Long, IdealRun.Profile> buildProfiles(MinecraftServer server, Collection<Long> depotIds) {
+		final Map<Long, IdealRun.Profile> out = new LinkedHashMap<>();
 		for (final ServerLevel level : server.getAllLevels()) {
 			final RailwayData rd = RailwayData.getInstance(level);
 			if (rd == null) {
@@ -111,7 +111,7 @@ public final class DiaAdapter {
 				if (byPos == null) {
 					byPos = platformsByRail(rd.platforms);
 				}
-				final DiaModel.Profile p = profileOf(t, sd, depot, dc, byPos);
+				final IdealRun.Profile p = profileOf(t, sd, depot, dc, byPos);
 				if (p != null && !p.stops.isEmpty()) {
 					out.put(depot.id, p);
 				}
@@ -127,13 +127,13 @@ public final class DiaAdapter {
 		return null;
 	}
 
-	private static DiaModel.Profile profileOf(TrainServer t, Siding sd, Depot depot, DataCache dc, Map<java.util.UUID, Platform> byPos) {
+	private static IdealRun.Profile profileOf(TrainServer t, Siding sd, Depot depot, DataCache dc, Map<java.util.UUID, Platform> byPos) {
 		final List<PathData> path = t.path;
 		final int n = path.size();
-		final DiaRailTime.Rail[] rails = new DiaRailTime.Rail[n];
+		final RailTime.Rail[] rails = new RailTime.Rail[n];
 		for (int i = 0; i < n; i++) {
 			final PathData pd = path.get(i);
-			final DiaRailTime.Rail r = new DiaRailTime.Rail();
+			final RailTime.Rail r = new RailTime.Rail();
 			r.length = pd.rail.getLength();
 			r.maxSpeed = pd.rail.railType.canAccelerate ? pd.rail.railType.maxBlocksPerTick : -1;
 			r.dwell = pd.dwellTime;
@@ -141,9 +141,9 @@ public final class DiaAdapter {
 			rails[i] = r;
 		}
 		final float railLength = railLength(t);
-		final DiaRailTime.Result res = DiaRailTime.compute(rails, railLength, t.trainCars, t.spacing, t.accelerationConstant, RailType.getDefaultMaxBlocksPerTick(t.transportMode));
+		final RailTime.Result res = RailTime.compute(rails, railLength, t.trainCars, t.spacing, t.accelerationConstant, RailType.getDefaultMaxBlocksPerTick(t.transportMode));
 
-		final DiaModel.Profile p = new DiaModel.Profile();
+		final IdealRun.Profile p = new IdealRun.Profile();
 		p.depotId = depot.id;
 		p.sidingId = sd.id;
 		p.total = res.totalTick / 20.0;
@@ -170,13 +170,13 @@ public final class DiaAdapter {
 			}
 			// 折り返し駅などで同じホームに続けて現れる(到着→折返し)場合は1つにまとめる
 			if (!p.stops.isEmpty()) {
-				final DiaModel.Stop last = p.stops.get(p.stops.size() - 1);
+				final IdealRun.Stop last = p.stops.get(p.stops.size() - 1);
 				if (last.platformId == platformId && last.pathIndex == i - 1) {
 					continue;
 				}
 			}
 			final Platform pf = dc.platformIdMap.get(platformId);
-			final DiaModel.Stop s = new DiaModel.Stop();
+			final IdealRun.Stop s = new IdealRun.Stop();
 			s.pathIndex = i;
 			s.platformId = platformId;
 			s.stationId = st.id;

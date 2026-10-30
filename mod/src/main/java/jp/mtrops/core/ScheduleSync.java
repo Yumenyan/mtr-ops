@@ -13,7 +13,7 @@ import java.util.Map;
 /**
  * 時刻表API(/api/schedule)・所要時間API(/api/runtimes)のための同期データ(S2C SCHEDULE、約20秒ごと)。
  *  ・全車庫の理想走行(車庫を出てから各停車駅に着く・出るまでの秒。MTRの走行計算と同じ)
- *  ・今後の出庫予定(UNIXミリ秒。MTRの車庫の出庫時刻から。カスタムダイヤの車庫は時刻表の出庫時刻に置き換わっている)
+ *  ・今後の出庫予定(UNIXミリ秒。MTRの車庫の出庫時刻から)
  *  ・駅間の所要時間の実績(SectionStats)
  */
 public final class ScheduleSync {
@@ -30,7 +30,7 @@ public final class ScheduleSync {
 		public long serverMillis;
 		/** 受信した時点のクライアントの時計 */
 		public long receivedMillis;
-		public Map<Long, DiaModel.Profile> profiles = new LinkedHashMap<>();
+		public Map<Long, IdealRun.Profile> profiles = new LinkedHashMap<>();
 		public Map<Long, long[]> deploys = new LinkedHashMap<>();
 		public SectionStats stats = new SectionStats();
 
@@ -40,14 +40,14 @@ public final class ScheduleSync {
 		}
 	}
 
-	public static byte[] encode(long serverMillis, Map<Long, DiaModel.Profile> profiles, Map<Long, List<Long>> deploys, SectionStats stats, int maxBytes) {
-		final Map<Long, DiaModel.Profile> profs = new LinkedHashMap<>(profiles);
+	public static byte[] encode(long serverMillis, Map<Long, IdealRun.Profile> profiles, Map<Long, List<Long>> deploys, SectionStats stats, int maxBytes) {
+		final Map<Long, IdealRun.Profile> profs = new LinkedHashMap<>(profiles);
 		byte[] out = write(serverMillis, profs, deploys, stats);
 		// 大きすぎるときは、停車駅の多い車庫の理想走行から落とす(出庫予定と実績は残す)
 		while (out.length > maxBytes && !profs.isEmpty()) {
 			Long biggest = null;
 			int most = -1;
-			for (final Map.Entry<Long, DiaModel.Profile> e : profs.entrySet()) {
+			for (final Map.Entry<Long, IdealRun.Profile> e : profs.entrySet()) {
 				if (e.getValue().stops.size() > most) {
 					most = e.getValue().stops.size();
 					biggest = e.getKey();
@@ -59,13 +59,13 @@ public final class ScheduleSync {
 		return out;
 	}
 
-	private static byte[] write(long serverMillis, Map<Long, DiaModel.Profile> profiles, Map<Long, List<Long>> deploys, SectionStats stats) {
+	private static byte[] write(long serverMillis, Map<Long, IdealRun.Profile> profiles, Map<Long, List<Long>> deploys, SectionStats stats) {
 		try {
 			final ByteArrayOutputStream bos = new ByteArrayOutputStream();
 			final DataOutputStream out = new DataOutputStream(bos);
 			out.writeInt(MAGIC);
 			out.writeLong(serverMillis);
-			final byte[] p = DiaCodec.encodeProfiles(profiles);
+			final byte[] p = IdealCodec.encodeProfiles(profiles);
 			out.writeInt(p.length);
 			out.write(p);
 			out.writeInt(deploys.size());
@@ -99,7 +99,7 @@ public final class ScheduleSync {
 		}
 		final byte[] p = new byte[len];
 		in.readFully(p);
-		s.profiles = DiaCodec.decodeProfiles(p);
+		s.profiles = IdealCodec.decodeProfiles(p);
 		final int n = in.readInt();
 		if (n < 0 || n > 100_000) {
 			throw new IOException("bad depot count");
@@ -120,18 +120,18 @@ public final class ScheduleSync {
 	}
 
 	/** 理想走行の駅間(停車駅→次の停車駅)ごとの、走行時間と停車時間(秒)。同じ区間が複数の車庫にあれば最初のもの。 */
-	public static Map<String, double[]> idealRunTimes(Map<Long, DiaModel.Profile> profiles) {
+	public static Map<String, double[]> idealRunTimes(Map<Long, IdealRun.Profile> profiles) {
 		final Map<String, double[]> out = new LinkedHashMap<>();
-		for (final DiaModel.Profile p : profiles.values()) {
-			final List<DiaModel.Stop> stops = new ArrayList<>();
-			for (final DiaModel.Stop s : p.stops) {
+		for (final IdealRun.Profile p : profiles.values()) {
+			final List<IdealRun.Stop> stops = new ArrayList<>();
+			for (final IdealRun.Stop s : p.stops) {
 				if (!s.pass) {
 					stops.add(s);
 				}
 			}
 			for (int i = 1; i < stops.size(); i++) {
-				final DiaModel.Stop a = stops.get(i - 1);
-				final DiaModel.Stop b = stops.get(i);
+				final IdealRun.Stop a = stops.get(i - 1);
+				final IdealRun.Stop b = stops.get(i);
 				if (a.stationId == b.stationId) {
 					continue;
 				}

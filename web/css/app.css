@@ -233,10 +233,7 @@ h2.sec::after{content:"";flex:1;height:1px;background:var(--line)}
 .xfc i{width:12px;height:12px;border-radius:50%;background:var(--c)}
 @media(prefers-reduced-motion:reduce){.strip{scroll-behavior:auto}.strip .lsym{transition:none}}
 
-/* ---- ダイヤ運転・折り返し後・駅の時刻表 ---- */
-.diatag{display:inline-block;margin-left:6px;padding:0 6px;border-radius:5px;font-size:10.5px;font-weight:800;line-height:1.6;color:#fff;background:#0b8a6e;vertical-align:middle;letter-spacing:.04em}
-.diatag[hidden]{display:none}
-.diatag.big{font-size:12px;padding:1px 8px;margin-left:12px}
+/* ---- 折り返し後・駅の時刻表 ---- */
 .livetag,.plantag{display:inline-block;margin-left:4px;padding:0 6px;border-radius:5px;font-size:10.5px;font-weight:700;line-height:1.6}
 .livetag{background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent)}
 .plantag{background:var(--soft);color:var(--sub)}

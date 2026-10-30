@@ -55,8 +55,8 @@ public final class TrainSample {
 
 	/**
 	 * これから着く停車駅(経路の終わりまで。折り返し後の路線も含む)と、到着までの残り(tick)。
-	 * etaTicks = 見込み(MTRの理論値を区間ごとの実績で補正。カスタムダイヤは時刻表の発車時刻まで待つことも考える)、
-	 * etaSchedTicks = 時刻表上の到着(カスタムダイヤのみ。それ以外は NO_SCHED)。
+	 * etaTicks = 見込み(MTRの理論値を区間ごとの実績で補正)、
+	 * etaSchedTicks = 時刻表上の到着(現在は常に NO_SCHED)。
 	 */
 	public long[] etaStationIds = new long[0];
 	public long[] etaPlatformIds = new long[0];
