@@ -28,7 +28,6 @@ import java.util.Set;
 /**
  * カスタムダイヤ用のMTRアクセス(MTR 3.2.2-hotfix-1 のソースで確認した公開API/フィールドのみ)。
  *  ・車庫ごとの理想走行(停車駅・通過するホーム・時刻)を作る
- *  ・車庫の作業用の出庫時刻(Depot.tempDepartures、保存されない)を作り直させる(DepotMixin が時刻表の時刻に置き換える)
  *
  * 車庫・路線・ホーム・レールなど MTR に保存されたデータは一切書き換えない。
  */
@@ -232,25 +231,6 @@ public final class DiaAdapter {
 	}
 
 	// ------------------------------------------------------------------ 出庫時刻
-
-	/**
-	 * 車庫の作業用の出庫時刻(Depot.tempDepartures)を作り直させる。カスタムダイヤの車庫は DepotMixin で時刻表の時刻に置き換わり、
-	 * カスタムでなくなった車庫は MTR の設定どおりに戻る。車庫に保存された設定(departures 等)は書き換えない。
-	 */
-	public static void regenerateDepartures(MinecraftServer server, Collection<Long> depotIds) {
-		for (final ServerLevel level : server.getAllLevels()) {
-			final RailwayData rd = RailwayData.getInstance(level);
-			if (rd == null) {
-				continue;
-			}
-			for (final Long id : depotIds) {
-				final Depot d = rd.dataCache.depotIdMap.get(id);
-				if (d != null) {
-					d.generateTempDepartures(level);
-				}
-			}
-		}
-	}
 
 	/**
 	 * 今後 horizonMillis 以内の出庫予定(UNIXミリ秒)。MTR の作業用の出庫時刻(tempDepartures、その日の0時(UTC)からのミリ秒)から求める。

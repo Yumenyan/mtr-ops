@@ -5,8 +5,7 @@
   "compatibilityLevel": "JAVA_17",
   "mixins": [
     "TrainMixin",
-    "TrainServerMixin",
-    "DepotMixin"
+    "TrainServerMixin"
   ],
   "injectors": {
     "defaultRequire": 0

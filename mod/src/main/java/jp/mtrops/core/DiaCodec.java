@@ -14,7 +14,7 @@ import java.util.Map;
 public final class DiaCodec {
 
 	private static final int MAGIC = 0x44494131; // "DIA1"
-	private static final int VERSION = 3;
+	private static final int VERSION = 4;
 
 	private DiaCodec() {
 	}
@@ -45,9 +45,6 @@ public final class DiaCodec {
 		out.writeInt(c.rev);
 		out.writeShort(c.sep);
 		out.writeShort(c.minOpen);
-		out.writeShort(c.maxHold);
-		out.writeShort(c.slackSec);
-		out.writeShort(c.slackPct);
 		out.writeInt(c.routes.size());
 		for (final DiaModel.RouteSetting r : c.routes.values()) {
 			out.writeLong(r.routeId);
@@ -56,48 +53,78 @@ public final class DiaCodec {
 			out.writeShort(r.overKmh);
 			out.writeShort(r.maxKmh);
 			out.writeShort(r.delayThreshold);
-		}
-		out.writeInt(c.plans.size());
-		for (final DiaModel.DepotPlan p : c.plans.values()) {
-			out.writeLong(p.depotId);
-			out.writeShort(p.anchor);
-			out.writeInt(p.first);
-			out.writeInt(p.last);
-			out.writeInt(p.offset);
-			out.writeBoolean(p.autoMesh);
-			out.writeShort(p.lead);
-			out.writeShort(p.periods.size());
-			for (final DiaModel.Period x : p.periods) {
-				out.writeUTF(x.name == null ? "" : x.name);
-				out.writeInt(x.start);
-				out.writeInt(x.end);
-				out.writeInt(x.headway);
-			}
-			out.writeShort(p.extra.size());
-			for (final Integer x : p.extra) {
-				out.writeInt(x);
-			}
-			out.writeShort(p.cancelled.size());
-			for (final Integer x : p.cancelled) {
-				out.writeInt(x);
-			}
-			out.writeShort(p.holds.size());
-			for (final Map.Entry<Integer, Integer> e : p.holds.entrySet()) {
-				out.writeShort(e.getKey());
-				out.writeShort(e.getValue());
+			out.writeBoolean(r.table != null);
+			if (r.table != null) {
+				writeTable(out, r.table);
 			}
 		}
 	}
 
+	private static void writeTable(DataOutputStream out, DiaModel.Table t) throws IOException {
+		out.writeInt(t.first);
+		out.writeInt(t.last);
+		out.writeShort(t.periods.size());
+		for (final DiaModel.Period x : t.periods) {
+			out.writeUTF(x.name == null ? "" : x.name);
+			out.writeInt(x.start);
+			out.writeInt(x.end);
+			out.writeInt(x.headway);
+		}
+		out.writeShort(t.extra.size());
+		for (final Integer x : t.extra) {
+			out.writeInt(x);
+		}
+		out.writeShort(t.cancelled.size());
+		for (final Integer x : t.cancelled) {
+			out.writeInt(x);
+		}
+		out.writeShort(t.offsets.size());
+		for (final Map.Entry<Integer, Integer> e : t.offsets.entrySet()) {
+			out.writeShort(e.getKey());
+			out.writeInt(e.getValue());
+		}
+	}
+
+	private static DiaModel.Table readTable(DataInputStream in) throws IOException {
+		final DiaModel.Table t = new DiaModel.Table();
+		t.first = in.readInt();
+		t.last = in.readInt();
+		final int pn = count(in.readShort(), DiaModel.MAX_PERIODS);
+		for (int k = 0; k < pn; k++) {
+			final DiaModel.Period x = new DiaModel.Period();
+			x.name = in.readUTF();
+			x.start = in.readInt();
+			x.end = in.readInt();
+			x.headway = in.readInt();
+			t.periods.add(x);
+		}
+		final int en = count(in.readShort(), DiaModel.MAX_EXTRA);
+		for (int k = 0; k < en; k++) {
+			t.extra.add(in.readInt());
+		}
+		final int cn = count(in.readShort(), DiaModel.MAX_EXTRA);
+		for (int k = 0; k < cn; k++) {
+			t.cancelled.add(in.readInt());
+		}
+		final int on = count(in.readShort(), 500);
+		for (int k = 0; k < on; k++) {
+			t.offsets.put((int) in.readShort(), in.readInt());
+		}
+		return t;
+	}
+
+	/** 版2〜3(車庫ごとの時刻表)の設定は、路線のダイヤ運転の有無・保安装置などだけ引き継ぎ、車庫の時刻表は捨てる。 */
 	static DiaModel.Config readConfig(DataInputStream in, int version) throws IOException {
 		final DiaModel.Config c = new DiaModel.Config();
 		c.rev = in.readInt();
 		c.sep = in.readShort();
 		c.minOpen = in.readShort();
-		c.maxHold = in.readShort();
-		if (version >= 2) {
-			c.slackSec = in.readShort();
-			c.slackPct = in.readShort();
+		if (version < 4) {
+			in.readShort(); // 旧 maxHold
+			if (version >= 2) {
+				in.readShort();
+				in.readShort(); // 旧 slackSec / slackPct
+			}
 		}
 		final int nr = count(in.readInt(), DiaModel.MAX_ROUTES);
 		for (int i = 0; i < nr; i++) {
@@ -108,40 +135,43 @@ public final class DiaCodec {
 			r.overKmh = in.readShort();
 			r.maxKmh = in.readShort();
 			r.delayThreshold = in.readShort();
+			if (version >= 4 && in.readBoolean()) {
+				r.table = readTable(in);
+			}
 			c.routes.put(r.routeId, r);
 		}
-		final int np = count(in.readInt(), DiaModel.MAX_PLANS);
-		for (int i = 0; i < np; i++) {
-			final DiaModel.DepotPlan p = new DiaModel.DepotPlan();
-			p.depotId = in.readLong();
-			p.anchor = in.readShort();
-			p.first = in.readInt();
-			p.last = in.readInt();
-			p.offset = in.readInt();
-			p.autoMesh = in.readBoolean();
-			p.lead = in.readShort();
-			final int pn = count(in.readShort(), DiaModel.MAX_PERIODS);
-			for (int k = 0; k < pn; k++) {
-				final DiaModel.Period x = new DiaModel.Period();
-				x.name = in.readUTF();
-				x.start = in.readInt();
-				x.end = in.readInt();
-				x.headway = in.readInt();
-				p.periods.add(x);
+		if (version < 4) {
+			// 旧: 車庫ごとの時刻表。使わないので読み飛ばす
+			final int np = count(in.readInt(), 1000);
+			for (int i = 0; i < np; i++) {
+				in.readLong();
+				in.readShort();
+				in.readInt();
+				in.readInt();
+				in.readInt();
+				in.readBoolean();
+				in.readShort();
+				final int pn = count(in.readShort(), DiaModel.MAX_PERIODS);
+				for (int k = 0; k < pn; k++) {
+					in.readUTF();
+					in.readInt();
+					in.readInt();
+					in.readInt();
+				}
+				final int en = count(in.readShort(), DiaModel.MAX_EXTRA);
+				for (int k = 0; k < en; k++) {
+					in.readInt();
+				}
+				final int cn = count(in.readShort(), DiaModel.MAX_EXTRA);
+				for (int k = 0; k < cn; k++) {
+					in.readInt();
+				}
+				final int hn = count(in.readShort(), 500);
+				for (int k = 0; k < hn; k++) {
+					in.readShort();
+					in.readShort();
+				}
 			}
-			final int en = count(in.readShort(), DiaModel.MAX_EXTRA);
-			for (int k = 0; k < en; k++) {
-				p.extra.add(in.readInt());
-			}
-			final int cn = count(in.readShort(), DiaModel.MAX_EXTRA);
-			for (int k = 0; k < cn; k++) {
-				p.cancelled.add(in.readInt());
-			}
-			final int hn = count(in.readShort(), 500);
-			for (int k = 0; k < hn; k++) {
-				p.holds.put((int) in.readShort(), (int) in.readShort());
-			}
-			c.plans.put(p.depotId, p);
 		}
 		return c;
 	}
@@ -184,7 +214,7 @@ public final class DiaCodec {
 		final DataInputStream in = new DataInputStream(new ByteArrayInputStream(data));
 		final int version = header(in);
 		final Map<Long, DiaModel.Profile> map = new java.util.LinkedHashMap<>();
-		final int n = count(in.readInt(), DiaModel.MAX_PLANS * 4);
+		final int n = count(in.readInt(), 4000);
 		for (int i = 0; i < n; i++) {
 			final DiaModel.Profile p = new DiaModel.Profile();
 			p.depotId = in.readLong();

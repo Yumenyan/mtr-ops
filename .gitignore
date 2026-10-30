@@ -1,2 +1,3 @@
-core-test/out/
+core-test/out*/
 core-test/out-modcheck/
+core-test/out/

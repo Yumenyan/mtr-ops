@@ -1,6 +1,7 @@
 package jp.mtrops.client;
 
 import com.mojang.blaze3d.vertex.PoseStack;
+import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
@@ -26,6 +27,10 @@ abstract class TipScreen extends Screen {
 		}
 	}
 
+	/** バニラのボタン画像の上限 */
+	static final int MAX_BUTTON_W = 200;
+	static final int MAX_BUTTON_H = 20;
+
 	private final List<Tip> tips = new ArrayList<>();
 
 	protected TipScreen(Component title) {
@@ -35,6 +40,16 @@ abstract class TipScreen extends Screen {
 	/** 次の build() で作り直せるよう、画面を組み立てる前に呼ぶ。 */
 	protected final void clearTips() {
 		tips.clear();
+	}
+
+	/**
+	 * ボタンを置く。バニラのボタン画像は幅200・高さ20を超えると途切れるので、大きさをそこで頭打ちにする。
+	 * (ツールチップの領域は引数の大きさのまま)
+	 */
+	protected final Button button(int x, int y, int w, int h, String label, Button.OnPress onPress) {
+		final Button b = new Button(x, y, Math.max(8, Math.min(MAX_BUTTON_W, w)), Math.max(8, Math.min(MAX_BUTTON_H, h)), Component.literal(label), onPress);
+		this.addRenderableWidget(b);
+		return b;
 	}
 
 	protected final void tip(int x, int y, int w, int h, String text) {
